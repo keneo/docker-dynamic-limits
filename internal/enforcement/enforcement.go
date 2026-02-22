@@ -1,0 +1,371 @@
+package enforcement
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"sync"
+	"time"
+
+	"github.com/keneo/docker-dynamic-limits/internal/cgroup"
+	"github.com/keneo/docker-dynamic-limits/internal/docker"
+	"github.com/keneo/docker-dynamic-limits/internal/model"
+	"github.com/keneo/docker-dynamic-limits/internal/proxy"
+	"github.com/keneo/docker-dynamic-limits/internal/store"
+)
+
+// Manager manages enforcement goroutines for all registered containers.
+type Manager struct {
+	store    *store.Store
+	docker   *docker.Client
+	cgroup   *cgroup.Reader
+	proxy    *proxy.SpendingTracker
+	interval time.Duration
+
+	mu        sync.Mutex
+	workers   map[string]context.CancelFunc // containerID -> cancel func
+	enforced  map[string]map[model.LimitType]bool
+}
+
+// NewManager creates an enforcement manager.
+func NewManager(st *store.Store, dc *docker.Client, cg *cgroup.Reader, px *proxy.SpendingTracker) *Manager {
+	return &Manager{
+		store:    st,
+		docker:   dc,
+		cgroup:   cg,
+		proxy:    px,
+		interval: time.Second,
+		workers:  make(map[string]context.CancelFunc),
+		enforced: make(map[string]map[model.LimitType]bool),
+	}
+}
+
+// StartContainer begins enforcement for a container.
+func (m *Manager) StartContainer(containerID string, dockerID string) {
+	m.mu.Lock()
+	if _, exists := m.workers[containerID]; exists {
+		m.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.workers[containerID] = cancel
+	m.enforced[containerID] = make(map[model.LimitType]bool)
+	m.mu.Unlock()
+
+	go m.enforcementLoop(ctx, containerID, dockerID)
+	log.Printf("[enforcement] started monitoring container %s", containerID)
+}
+
+// StopContainer stops enforcement for a container.
+func (m *Manager) StopContainer(containerID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if cancel, ok := m.workers[containerID]; ok {
+		cancel()
+		delete(m.workers, containerID)
+		delete(m.enforced, containerID)
+		log.Printf("[enforcement] stopped monitoring container %s", containerID)
+	}
+}
+
+// IsEnforced returns whether a specific limit is currently being enforced.
+func (m *Manager) IsEnforced(containerID string, lt model.LimitType) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e, ok := m.enforced[containerID]; ok {
+		return e[lt]
+	}
+	return false
+}
+
+// GetEnforced returns all enforcement states for a container.
+func (m *Manager) GetEnforced(containerID string) map[model.LimitType]bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make(map[model.LimitType]bool)
+	if e, ok := m.enforced[containerID]; ok {
+		for k, v := range e {
+			result[k] = v
+		}
+	}
+	return result
+}
+
+// NotifyLimitChanged should be called when a limit is changed so enforcement
+// can immediately re-evaluate.
+func (m *Manager) NotifyLimitChanged(containerID string) {
+	// The enforcement loop polls every second, so limit changes
+	// are picked up quickly. This method exists for future optimization
+	// (e.g., using channels to wake the loop immediately).
+}
+
+func (m *Manager) enforcementLoop(ctx context.Context, containerID, dockerID string) {
+	ticker := time.NewTicker(m.interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.checkAndEnforce(ctx, containerID, dockerID)
+		}
+	}
+}
+
+func (m *Manager) checkAndEnforce(ctx context.Context, containerID, dockerID string) {
+	// Check if container is still running
+	running, err := m.docker.IsContainerRunning(ctx, dockerID)
+	if err != nil || !running {
+		return
+	}
+
+	limits, err := m.store.GetAllLimits(containerID)
+	if err != nil {
+		log.Printf("[enforcement] error getting limits for %s: %v", containerID, err)
+		return
+	}
+
+	// Find cgroup path
+	cgroupPath, cgroupErr := m.cgroup.FindCgroupPath(dockerID)
+
+	// Check each limit type
+	for _, lt := range model.AllLimitTypes {
+		limit, hasLimit := limits[lt]
+		if !hasLimit || limit == 0 {
+			continue
+		}
+
+		usage, err := m.getCurrentUsage(ctx, containerID, dockerID, lt, cgroupPath, cgroupErr)
+		if err != nil {
+			continue
+		}
+
+		// Persist usage to store
+		m.store.SetUsage(containerID, lt, usage)
+
+		exceeded := usage >= limit
+		m.mu.Lock()
+		wasEnforced := m.enforced[containerID][lt]
+		m.mu.Unlock()
+
+		if exceeded && !wasEnforced {
+			m.enforce(ctx, containerID, dockerID, lt, cgroupPath)
+		} else if !exceeded && wasEnforced {
+			m.release(ctx, containerID, dockerID, lt, cgroupPath)
+		}
+	}
+}
+
+func (m *Manager) getCurrentUsage(ctx context.Context, containerID, dockerID string, lt model.LimitType, cgroupPath string, cgroupErr error) (int64, error) {
+	switch lt {
+	case model.LimitCPU:
+		if cgroupErr != nil {
+			return 0, cgroupErr
+		}
+		usec, err := m.cgroup.CPUUsageMicroseconds(cgroupPath)
+		if err != nil {
+			return 0, err
+		}
+		return usec / 1_000_000, nil // convert to seconds
+
+	case model.LimitRAM:
+		if cgroupErr != nil {
+			return 0, cgroupErr
+		}
+		return m.cgroup.MemoryCurrent(cgroupPath)
+
+	case model.LimitDisk:
+		return m.docker.GetContainerDiskUsage(ctx, dockerID)
+
+	case model.LimitNetwork:
+		if cgroupErr != nil {
+			return 0, cgroupErr
+		}
+		// Try to get network stats from stored veth name or default
+		// For simplicity, read from stored usage + incremental
+		usage, _ := m.store.GetUsage(containerID, lt)
+		return usage, nil
+
+	case model.LimitDiskIOByte:
+		if cgroupErr != nil {
+			return 0, cgroupErr
+		}
+		stats, err := m.cgroup.ReadIOStat(cgroupPath)
+		if err != nil {
+			return 0, err
+		}
+		return stats.TotalBytes, nil
+
+	case model.LimitDiskIOOps:
+		if cgroupErr != nil {
+			return 0, cgroupErr
+		}
+		stats, err := m.cgroup.ReadIOStat(cgroupPath)
+		if err != nil {
+			return 0, err
+		}
+		return stats.TotalOps, nil
+
+	case model.LimitSpending:
+		if m.proxy != nil {
+			return m.proxy.GetSpending(containerID), nil
+		}
+		return 0, nil
+
+	default:
+		return 0, fmt.Errorf("unknown limit type: %s", lt)
+	}
+}
+
+func (m *Manager) enforce(ctx context.Context, containerID, dockerID string, lt model.LimitType, cgroupPath string) {
+	var err error
+	switch lt {
+	case model.LimitCPU:
+		err = m.docker.PauseContainer(ctx, dockerID)
+		if err == nil {
+			log.Printf("[enforcement] paused container %s: CPU limit exceeded", containerID)
+		}
+
+	case model.LimitRAM:
+		// RAM is enforced by the kernel via memory.max — we just update it
+		limit, _ := m.store.GetLimit(containerID, lt)
+		err = m.docker.UpdateMemoryLimit(ctx, dockerID, limit)
+		if err == nil {
+			log.Printf("[enforcement] set memory limit for %s to %d bytes", containerID, limit)
+		}
+
+	case model.LimitDisk:
+		err = m.docker.PauseContainer(ctx, dockerID)
+		if err == nil {
+			log.Printf("[enforcement] paused container %s: disk limit exceeded", containerID)
+		}
+
+	case model.LimitNetwork:
+		err = m.docker.DisconnectNetwork(ctx, dockerID)
+		if err == nil {
+			log.Printf("[enforcement] disconnected network for %s: network limit exceeded", containerID)
+		}
+
+	case model.LimitDiskIOByte, model.LimitDiskIOOps:
+		// Throttle IO to near-zero
+		if cgroupPath != "" {
+			err = m.cgroup.SetIOMax(cgroupPath, "8:0", 1, 1)
+			if err == nil {
+				log.Printf("[enforcement] throttled IO for %s: disk IO limit exceeded", containerID)
+			}
+		}
+
+	case model.LimitSpending:
+		// Spending enforcement is handled by the proxy itself
+		log.Printf("[enforcement] spending limit exceeded for %s", containerID)
+	}
+
+	if err != nil {
+		log.Printf("[enforcement] error enforcing %s for %s: %v", lt, containerID, err)
+		return
+	}
+
+	m.mu.Lock()
+	if m.enforced[containerID] == nil {
+		m.enforced[containerID] = make(map[model.LimitType]bool)
+	}
+	m.enforced[containerID][lt] = true
+	m.mu.Unlock()
+}
+
+func (m *Manager) release(ctx context.Context, containerID, dockerID string, lt model.LimitType, cgroupPath string) {
+	var err error
+	switch lt {
+	case model.LimitCPU:
+		paused, _ := m.docker.IsContainerPaused(ctx, dockerID)
+		if paused {
+			// Only unpause if no other limit type is also enforcing pause
+			if !m.isOtherPauseActive(containerID, lt) {
+				err = m.docker.UnpauseContainer(ctx, dockerID)
+				if err == nil {
+					log.Printf("[enforcement] resumed container %s: CPU limit increased", containerID)
+				}
+			}
+		}
+
+	case model.LimitRAM:
+		limit, _ := m.store.GetLimit(containerID, lt)
+		err = m.docker.UpdateMemoryLimit(ctx, dockerID, limit)
+		if err == nil {
+			log.Printf("[enforcement] updated memory limit for %s to %d bytes", containerID, limit)
+		}
+
+	case model.LimitDisk:
+		paused, _ := m.docker.IsContainerPaused(ctx, dockerID)
+		if paused && !m.isOtherPauseActive(containerID, lt) {
+			err = m.docker.UnpauseContainer(ctx, dockerID)
+			if err == nil {
+				log.Printf("[enforcement] resumed container %s: disk limit increased", containerID)
+			}
+		}
+
+	case model.LimitNetwork:
+		err = m.docker.ReconnectNetwork(ctx, dockerID)
+		if err == nil {
+			log.Printf("[enforcement] reconnected network for %s: network limit increased", containerID)
+		}
+
+	case model.LimitDiskIOByte, model.LimitDiskIOOps:
+		if cgroupPath != "" {
+			err = m.cgroup.RemoveIOMax(cgroupPath, "8:0")
+			if err == nil {
+				log.Printf("[enforcement] unthrottled IO for %s: IO limit increased", containerID)
+			}
+		}
+
+	case model.LimitSpending:
+		log.Printf("[enforcement] spending limit released for %s", containerID)
+	}
+
+	if err != nil {
+		log.Printf("[enforcement] error releasing %s for %s: %v", lt, containerID, err)
+		return
+	}
+
+	m.mu.Lock()
+	if m.enforced[containerID] != nil {
+		m.enforced[containerID][lt] = false
+	}
+	m.mu.Unlock()
+}
+
+// isOtherPauseActive checks if another limit type that uses pause is also enforced.
+func (m *Manager) isOtherPauseActive(containerID string, except model.LimitType) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pauseTypes := []model.LimitType{model.LimitCPU, model.LimitDisk}
+	for _, lt := range pauseTypes {
+		if lt != except && m.enforced[containerID][lt] {
+			return true
+		}
+	}
+	return false
+}
+
+// StartAll begins enforcement for all registered containers.
+func (m *Manager) StartAll() error {
+	containers, err := m.store.ListContainers()
+	if err != nil {
+		return err
+	}
+	for _, c := range containers {
+		m.StartContainer(c.ID, c.DockerID)
+	}
+	return nil
+}
+
+// StopAll stops enforcement for all containers.
+func (m *Manager) StopAll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, cancel := range m.workers {
+		cancel()
+		delete(m.workers, id)
+	}
+}
