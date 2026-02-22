@@ -271,7 +271,15 @@ func setLimit(container, limitType, valueStr, operation string) error {
 	json.NewDecoder(resp.Body).Decode(&result)
 
 	newVal := int64(result["value"].(float64))
-	fmt.Printf("%s %s limit %sd to %s\n", container, limitType, operation, formatValue(limitType, newVal))
+	verb := operation + "d"
+	if operation == "set" {
+		verb = "set"
+	} else if operation == "increase" {
+		verb = "increased"
+	} else if operation == "decrease" {
+		verb = "decreased"
+	}
+	fmt.Printf("%s %s limit %s to %s\n", container, limitType, verb, formatValue(limitType, newVal))
 	return nil
 }
 
