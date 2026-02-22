@@ -11,6 +11,23 @@ import (
 	"github.com/keneo/docker-dynamic-limits/internal/model"
 )
 
+// DataStore defines the interface for persistent storage operations.
+type DataStore interface {
+	RegisterContainer(dockerID, name string) (*model.Container, error)
+	GetContainer(id string) (*model.Container, error)
+	ListContainers() ([]model.Container, error)
+	RemoveContainer(id string) error
+	SetLimit(containerID string, limitType model.LimitType, value int64) error
+	GetLimit(containerID string, limitType model.LimitType) (int64, error)
+	GetAllLimits(containerID string) (map[model.LimitType]int64, error)
+	SetUsage(containerID string, limitType model.LimitType, value int64) error
+	GetUsage(containerID string, limitType model.LimitType) (int64, error)
+	GetAllUsage(containerID string) (map[model.LimitType]int64, error)
+	AddUsage(containerID string, limitType model.LimitType, delta int64) error
+	CopyLimits(fromID, toID string) error
+	ResolveContainerID(query string) (string, error)
+}
+
 // Store provides persistent storage for container registrations, limits, and usage.
 type Store struct {
 	db *sql.DB

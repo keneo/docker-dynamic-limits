@@ -11,6 +11,14 @@ import (
 	"sync"
 )
 
+// SpendingProxy defines the interface for spending tracking operations.
+type SpendingProxy interface {
+	RegisterContainer(containerID string, budget int64, existingSpending int64) (string, error)
+	UpdateBudget(containerID string, budget int64)
+	GetSpending(containerID string) int64
+	SetSpending(containerID string, cents int64)
+}
+
 // SpendingTracker tracks API spending per container via an HTTP forward proxy.
 type SpendingTracker struct {
 	mu       sync.RWMutex
@@ -163,7 +171,8 @@ func (st *SpendingTracker) proxyHandler(containerID string) http.Handler {
 	})
 }
 
-func (st *SpendingTracker) isTrackedAPI(host string) bool {
+// IsTrackedAPIHost returns true if the host is a tracked API endpoint.
+func IsTrackedAPIHost(host string) bool {
 	tracked := []string{
 		"api.openai.com",
 		"api.anthropic.com",
@@ -174,6 +183,10 @@ func (st *SpendingTracker) isTrackedAPI(host string) bool {
 		}
 	}
 	return false
+}
+
+func (st *SpendingTracker) isTrackedAPI(host string) bool {
+	return IsTrackedAPIHost(host)
 }
 
 // apiUsage is the common usage structure in API responses.
@@ -210,12 +223,7 @@ func (st *SpendingTracker) trackSpending(containerID string, host string, body [
 		pricing = ModelPricing{InputPerToken: 1000, OutputPerToken: 3000}
 	}
 
-	// Calculate cost in micro-cents, then convert to cents
-	costMicroCents := inputTokens*pricing.InputPerToken + outputTokens*pricing.OutputPerToken
-	costCents := costMicroCents / 1_000_000
-	if costCents == 0 && costMicroCents > 0 {
-		costCents = 1 // minimum 1 cent charge to avoid free-riding
-	}
+	costCents := CalculateSpendingCents(inputTokens, outputTokens, pricing)
 
 	st.mu.Lock()
 	st.spending[containerID] += costCents
@@ -228,6 +236,16 @@ func (st *SpendingTracker) trackSpending(containerID string, host string, body [
 
 	log.Printf("[proxy] container %s: %d input + %d output tokens (%s) = %d cents (total: %d)",
 		containerID, inputTokens, outputTokens, resp.Model, costCents, newTotal)
+}
+
+// CalculateSpendingCents calculates the cost in cents from token counts and pricing.
+func CalculateSpendingCents(inputTokens, outputTokens int64, pricing ModelPricing) int64 {
+	costMicroCents := inputTokens*pricing.InputPerToken + outputTokens*pricing.OutputPerToken
+	costCents := costMicroCents / 1_000_000
+	if costCents == 0 && costMicroCents > 0 {
+		costCents = 1 // minimum 1 cent charge to avoid free-riding
+	}
+	return costCents
 }
 
 func normalizeModelName(model string) string {

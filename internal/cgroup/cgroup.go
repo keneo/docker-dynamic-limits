@@ -9,6 +9,18 @@ import (
 	"strings"
 )
 
+// CgroupReader defines the interface for cgroup operations.
+type CgroupReader interface {
+	FindCgroupPath(dockerID string) (string, error)
+	CPUUsageMicroseconds(cgroupPath string) (int64, error)
+	MemoryCurrent(cgroupPath string) (int64, error)
+	SetMemoryMax(cgroupPath string, bytes int64) error
+	ReadIOStat(cgroupPath string) (*IOStats, error)
+	SetIOMax(cgroupPath string, deviceNum string, bps int64, iops int64) error
+	RemoveIOMax(cgroupPath string, deviceNum string) error
+	ReadNetworkStats(vethName string) (*NetworkStats, error)
+}
+
 // Reader reads cgroup v2 stats for a container.
 type Reader struct {
 	basePath string // e.g., /sys/fs/cgroup
@@ -39,13 +51,9 @@ func (r *Reader) FindCgroupPath(dockerID string) (string, error) {
 	return "", fmt.Errorf("cgroup path not found for container %s", dockerID[:12])
 }
 
-// CPUUsageMicroseconds reads cumulative CPU usage in microseconds from cpu.stat.
-func (r *Reader) CPUUsageMicroseconds(cgroupPath string) (int64, error) {
-	data, err := os.ReadFile(filepath.Join(cgroupPath, "cpu.stat"))
-	if err != nil {
-		return 0, fmt.Errorf("read cpu.stat: %w", err)
-	}
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+// ParseCPUUsageMicroseconds parses the usage_usec value from cpu.stat content.
+func ParseCPUUsageMicroseconds(content string) (int64, error) {
+	scanner := bufio.NewScanner(strings.NewReader(content))
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "usage_usec ") {
@@ -56,6 +64,15 @@ func (r *Reader) CPUUsageMicroseconds(cgroupPath string) (int64, error) {
 		}
 	}
 	return 0, fmt.Errorf("usage_usec not found in cpu.stat")
+}
+
+// CPUUsageMicroseconds reads cumulative CPU usage in microseconds from cpu.stat.
+func (r *Reader) CPUUsageMicroseconds(cgroupPath string) (int64, error) {
+	data, err := os.ReadFile(filepath.Join(cgroupPath, "cpu.stat"))
+	if err != nil {
+		return 0, fmt.Errorf("read cpu.stat: %w", err)
+	}
+	return ParseCPUUsageMicroseconds(string(data))
 }
 
 // MemoryCurrent reads the current memory usage in bytes.
@@ -79,14 +96,10 @@ type IOStats struct {
 	TotalOps   int64
 }
 
-func (r *Reader) ReadIOStat(cgroupPath string) (*IOStats, error) {
-	data, err := os.ReadFile(filepath.Join(cgroupPath, "io.stat"))
-	if err != nil {
-		return nil, fmt.Errorf("read io.stat: %w", err)
-	}
-
+// ParseIOStat parses io.stat content and returns aggregated IO statistics.
+func ParseIOStat(content string) (*IOStats, error) {
 	stats := &IOStats{}
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	scanner := bufio.NewScanner(strings.NewReader(content))
 	for scanner.Scan() {
 		line := scanner.Text()
 		fields := strings.Fields(line)
@@ -109,6 +122,14 @@ func (r *Reader) ReadIOStat(cgroupPath string) (*IOStats, error) {
 		}
 	}
 	return stats, nil
+}
+
+func (r *Reader) ReadIOStat(cgroupPath string) (*IOStats, error) {
+	data, err := os.ReadFile(filepath.Join(cgroupPath, "io.stat"))
+	if err != nil {
+		return nil, fmt.Errorf("read io.stat: %w", err)
+	}
+	return ParseIOStat(string(data))
 }
 
 // SetIOMax throttles IO to near-zero or restores it.

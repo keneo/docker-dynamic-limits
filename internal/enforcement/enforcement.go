@@ -14,12 +14,21 @@ import (
 	"github.com/keneo/docker-dynamic-limits/internal/store"
 )
 
+// EnforcementController defines the interface for enforcement operations.
+type EnforcementController interface {
+	StartContainer(containerID string, dockerID string)
+	StopContainer(containerID string)
+	IsEnforced(containerID string, lt model.LimitType) bool
+	GetEnforced(containerID string) map[model.LimitType]bool
+	NotifyLimitChanged(containerID string)
+}
+
 // Manager manages enforcement goroutines for all registered containers.
 type Manager struct {
-	store    *store.Store
-	docker   *docker.Client
-	cgroup   *cgroup.Reader
-	proxy    *proxy.SpendingTracker
+	store    store.DataStore
+	docker   docker.DockerClient
+	cgroup   cgroup.CgroupReader
+	proxy    proxy.SpendingProxy
 	interval time.Duration
 
 	mu        sync.Mutex
@@ -28,7 +37,7 @@ type Manager struct {
 }
 
 // NewManager creates an enforcement manager.
-func NewManager(st *store.Store, dc *docker.Client, cg *cgroup.Reader, px *proxy.SpendingTracker) *Manager {
+func NewManager(st store.DataStore, dc docker.DockerClient, cg cgroup.CgroupReader, px proxy.SpendingProxy) *Manager {
 	return &Manager{
 		store:    st,
 		docker:   dc,

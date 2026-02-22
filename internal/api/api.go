@@ -17,15 +17,15 @@ import (
 
 // Server is the REST API server for ddld.
 type Server struct {
-	store       *store.Store
-	docker      *docker.Client
-	enforcement *enforcement.Manager
-	proxy       *proxy.SpendingTracker
+	store       store.DataStore
+	docker      docker.DockerClient
+	enforcement enforcement.EnforcementController
+	proxy       proxy.SpendingProxy
 	mux         *http.ServeMux
 }
 
 // NewServer creates a new API server.
-func NewServer(st *store.Store, dc *docker.Client, em *enforcement.Manager, px *proxy.SpendingTracker) *Server {
+func NewServer(st store.DataStore, dc docker.DockerClient, em enforcement.EnforcementController, px proxy.SpendingProxy) *Server {
 	s := &Server{
 		store:       st,
 		docker:      dc,

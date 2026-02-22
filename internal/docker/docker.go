@@ -11,6 +11,21 @@ import (
 	"github.com/docker/docker/client"
 )
 
+// DockerClient defines the interface for Docker operations.
+type DockerClient interface {
+	InspectContainer(ctx context.Context, id string) (types.ContainerJSON, error)
+	PauseContainer(ctx context.Context, id string) error
+	UnpauseContainer(ctx context.Context, id string) error
+	IsContainerPaused(ctx context.Context, id string) (bool, error)
+	IsContainerRunning(ctx context.Context, id string) (bool, error)
+	UpdateMemoryLimit(ctx context.Context, id string, memoryBytes int64) error
+	ContainerVethName(ctx context.Context, id string) (string, error)
+	CloneContainer(ctx context.Context, sourceID string, newName string) (string, error)
+	GetContainerDiskUsage(ctx context.Context, id string) (int64, error)
+	DisconnectNetwork(ctx context.Context, id string) error
+	ReconnectNetwork(ctx context.Context, id string) error
+}
+
 // Client wraps the Docker Engine API.
 type Client struct {
 	cli *client.Client
