@@ -82,7 +82,8 @@ func (c *Client) IsContainerRunning(ctx context.Context, id string) (bool, error
 func (c *Client) UpdateMemoryLimit(ctx context.Context, id string, memoryBytes int64) error {
 	_, err := c.cli.ContainerUpdate(ctx, id, container.UpdateConfig{
 		Resources: container.Resources{
-			Memory: memoryBytes,
+			Memory:     memoryBytes,
+			MemorySwap: memoryBytes,
 		},
 	})
 	return err
