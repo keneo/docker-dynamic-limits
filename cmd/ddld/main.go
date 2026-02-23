@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/keneo/docker-dynamic-limits/internal/api"
@@ -52,6 +53,20 @@ func main() {
 	px := proxy.NewSpendingTracker(func(containerID string, totalCents int64) {
 		st.SetUsage(containerID, model.LimitSpending, totalCents)
 	})
+
+	// Apply proxy resolve overrides (for testing with mock API servers)
+	// Format: DDL_PROXY_RESOLVE=api.openai.com=127.0.0.1,api.anthropic.com=127.0.0.1
+	if resolves := os.Getenv("DDL_PROXY_RESOLVE"); resolves != "" {
+		overrides := make(map[string]string)
+		for _, entry := range strings.Split(resolves, ",") {
+			parts := strings.SplitN(entry, "=", 2)
+			if len(parts) == 2 {
+				overrides[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+			}
+		}
+		px.SetResolveOverrides(overrides)
+		log.Printf("proxy resolve overrides: %v", overrides)
+	}
 
 	// Initialize enforcement manager
 	em := enforcement.NewManager(st, dc, cg, px)

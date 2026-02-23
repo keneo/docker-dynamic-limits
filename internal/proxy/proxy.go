@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,6 +33,8 @@ type SpendingTracker struct {
 	prices map[string]ModelPricing
 	// onSpendingUpdate is called when spending changes (to persist to store)
 	onSpendingUpdate func(containerID string, totalCents int64)
+	// transport is the HTTP transport used for outgoing requests (nil = http.DefaultTransport)
+	transport http.RoundTripper
 }
 
 // ModelPricing holds per-token costs in micro-cents.
@@ -136,8 +139,13 @@ func (st *SpendingTracker) proxyHandler(containerID string) http.Handler {
 			return
 		}
 		outReq.Header = r.Header.Clone()
+		outReq.ContentLength = r.ContentLength
 
-		resp, err := http.DefaultTransport.RoundTrip(outReq)
+		transport := st.transport
+		if transport == nil {
+			transport = http.DefaultTransport
+		}
+		resp, err := transport.RoundTrip(outReq)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -331,5 +339,22 @@ func (st *SpendingTracker) LoadPrices(r io.Reader) error {
 		st.prices[k] = v
 	}
 	return nil
+}
+
+// SetResolveOverrides configures DNS resolution overrides so that requests
+// to the given hostnames are routed to the specified IP addresses instead.
+// This enables testing with mock API servers on localhost.
+func (st *SpendingTracker) SetResolveOverrides(overrides map[string]string) {
+	st.transport = &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err == nil {
+				if override, ok := overrides[host]; ok {
+					addr = net.JoinHostPort(override, port)
+				}
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		},
+	}
 }
 
