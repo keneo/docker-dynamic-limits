@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -35,6 +36,7 @@ func main() {
 	root.AddCommand(lsCmd())
 	root.AddCommand(removeCmd())
 	root.AddCommand(dashboardCmd())
+	root.AddCommand(daemonCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -176,7 +178,7 @@ func lsCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resp, err := http.Get(apiURL + "/containers")
 			if err != nil {
-				return fmt.Errorf("connect to ddld: %w", err)
+				return wrapConnErr(err)
 			}
 			defer resp.Body.Close()
 
@@ -222,7 +224,7 @@ func removeCmd() *cobra.Command {
 			}
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
-				return fmt.Errorf("connect to ddld: %w", err)
+				return wrapConnErr(err)
 			}
 			defer resp.Body.Close()
 
@@ -258,7 +260,7 @@ func setLimit(container, limitType, valueStr, operation string) error {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("connect to ddld: %w", err)
+		return wrapConnErr(err)
 	}
 	defer resp.Body.Close()
 
@@ -286,7 +288,7 @@ func setLimit(container, limitType, valueStr, operation string) error {
 func apiGet(path string) (map[string]interface{}, error) {
 	resp, err := http.Get(apiURL + path)
 	if err != nil {
-		return nil, fmt.Errorf("connect to ddld: %w", err)
+		return nil, wrapConnErr(err)
 	}
 	defer resp.Body.Close()
 
@@ -309,7 +311,7 @@ func apiPostPath(path string, body interface{}) (map[string]interface{}, error) 
 	data, _ := json.Marshal(body)
 	resp, err := http.Post(apiURL+path, "application/json", bytes.NewReader(data))
 	if err != nil {
-		return nil, fmt.Errorf("connect to ddld: %w", err)
+		return nil, wrapConnErr(err)
 	}
 	defer resp.Body.Close()
 
@@ -333,5 +335,16 @@ func readAPIError(resp *http.Response) error {
 		}
 	}
 	return fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+}
+
+func wrapConnErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "connection refused") || strings.Contains(msg, "connection reset") {
+		return fmt.Errorf("connect to ddld: %w\nHint: run \"ddl daemon start\" to start the daemon", err)
+	}
+	return fmt.Errorf("connect to ddld: %w", err)
 }
 

@@ -1,0 +1,7 @@
+.git
+*.exe
+ddl
+ddld
+e2e/
+*.db
+*.test
