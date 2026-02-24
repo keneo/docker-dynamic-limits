@@ -34,6 +34,7 @@ func main() {
 	root.AddCommand(cloneCmd())
 	root.AddCommand(lsCmd())
 	root.AddCommand(removeCmd())
+	root.AddCommand(dashboardCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

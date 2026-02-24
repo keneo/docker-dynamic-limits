@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Docker Dynamic Limits</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>Docker Dynamic Limits</h1>
+        <div class="header-controls">
+            <span id="status-indicator" class="status disconnected" title="Disconnected"></span>
+            <span id="last-refresh"></span>
+            <label>Refresh:
+                <select id="refresh-interval">
+                    <option value="0">Off</option>
+                    <option value="2000">2s</option>
+                    <option value="5000" selected>5s</option>
+                    <option value="10000">10s</option>
+                    <option value="30000">30s</option>
+                </select>
+            </label>
+            <button id="btn-register" class="btn btn-primary">Register Container</button>
+        </div>
+    </header>
+
+    <main>
+        <table id="container-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Name</th>
+                    <th>Limits</th>
+                    <th>Enforced</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="container-tbody"></tbody>
+        </table>
+        <p id="empty-msg" class="empty-msg" hidden>No containers registered.</p>
+
+        <div id="detail-panel" class="detail-panel" hidden>
+            <div class="detail-header">
+                <h2 id="detail-title"></h2>
+                <button id="detail-close" class="btn btn-sm">&times;</button>
+            </div>
+            <div id="detail-limits"></div>
+        </div>
+    </main>
+
+    <div id="toast-container"></div>
+
+    <!-- Register Dialog -->
+    <dialog id="register-dialog">
+        <form method="dialog">
+            <h3>Register Container</h3>
+            <label>Container ID or Name
+                <input type="text" id="register-id" required placeholder="e.g. abc123 or my-container">
+            </label>
+            <div class="dialog-actions">
+                <button type="button" class="btn" onclick="this.closest('dialog').close()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Register</button>
+            </div>
+        </form>
+    </dialog>
+
+    <!-- Set Limit Dialog -->
+    <dialog id="limit-dialog">
+        <form method="dialog">
+            <h3>Modify Limit</h3>
+            <input type="hidden" id="limit-container-id">
+            <label>Type
+                <select id="limit-type">
+                    <option value="cpu">CPU</option>
+                    <option value="ram">RAM</option>
+                    <option value="disk">Disk</option>
+                    <option value="net">Network</option>
+                    <option value="disk-io-bytes">Disk I/O Bytes</option>
+                    <option value="disk-io-ops">Disk I/O Ops</option>
+                    <option value="spending">Spending</option>
+                </select>
+            </label>
+            <label>Value
+                <input type="text" id="limit-value" required placeholder="e.g. 1h, 512m, 10g, 10.00">
+            </label>
+            <label>Operation
+                <select id="limit-operation">
+                    <option value="set">Set</option>
+                    <option value="increase">Increase</option>
+                    <option value="decrease">Decrease</option>
+                </select>
+            </label>
+            <div class="dialog-actions">
+                <button type="button" class="btn" onclick="this.closest('dialog').close()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Apply</button>
+            </div>
+        </form>
+    </dialog>
+
+    <!-- Confirm Dialog -->
+    <dialog id="confirm-dialog">
+        <form method="dialog">
+            <h3 id="confirm-title">Confirm</h3>
+            <p id="confirm-message"></p>
+            <div class="dialog-actions">
+                <button type="button" class="btn" value="cancel" onclick="this.closest('dialog').close('cancel')">Cancel</button>
+                <button type="submit" class="btn btn-danger" value="confirm">Confirm</button>
+            </div>
+        </form>
+    </dialog>
+
+    <script src="app.js"></script>
+</body>
+</html>
