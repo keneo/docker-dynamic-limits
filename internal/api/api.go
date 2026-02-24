@@ -46,9 +46,27 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/limits", s.handleSelfLimits)
 }
 
-// Handler returns the HTTP handler.
+// Handler returns the HTTP handler (full API).
 func (s *Server) Handler() http.Handler {
 	return s.mux
+}
+
+// ReadOnlyHandler returns an HTTP handler with only read-only, guest-facing routes.
+// This is intended for the TCP listener that containers can reach.
+func (s *Server) ReadOnlyHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/containers", s.handleContainersReadOnly)
+	mux.HandleFunc("/usage", s.handleSelfUsage)
+	mux.HandleFunc("/limits", s.handleSelfLimits)
+	return mux
+}
+
+func (s *Server) handleContainersReadOnly(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.handleContainers(w, r)
 }
 
 // --- Container management ---

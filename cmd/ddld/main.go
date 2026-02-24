@@ -3,9 +3,11 @@ package main
 import (
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -19,7 +21,8 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", ":7123", "API listen address")
+	addr := flag.String("addr", ":7123", "read-only TCP listen address for containers")
+	sock := flag.String("sock", "/run/ddl/ddl.sock", "management API unix socket path (empty to disable)")
 	dbPath := flag.String("db", "/var/lib/ddl/ddl.db", "SQLite database path")
 	cgroupBase := flag.String("cgroup-base", "/sys/fs/cgroup", "cgroup v2 base path")
 	flag.Parse()
@@ -79,18 +82,45 @@ func main() {
 	// Create API server
 	srv := api.NewServer(st, dc, em, px)
 
-	// Start HTTP server
-	httpServer := &http.Server{
+	// Start read-only TCP server (for containers)
+	tcpServer := &http.Server{
 		Addr:    *addr,
-		Handler: srv.Handler(),
+		Handler: srv.ReadOnlyHandler(),
 	}
 
 	go func() {
-		log.Printf("API listening on %s", *addr)
-		if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
-			log.Fatalf("HTTP server error: %v", err)
+		log.Printf("read-only TCP API listening on %s", *addr)
+		if err := tcpServer.ListenAndServe(); err != http.ErrServerClosed {
+			log.Fatalf("TCP server error: %v", err)
 		}
 	}()
+
+	// Start full API unix socket server (for host management)
+	var sockServer *http.Server
+	if *sock != "" {
+		// Ensure socket directory exists
+		sockDir := filepath.Dir(*sock)
+		os.MkdirAll(sockDir, 0755)
+
+		// Remove stale socket file
+		os.Remove(*sock)
+
+		listener, err := net.Listen("unix", *sock)
+		if err != nil {
+			log.Fatalf("failed to listen on unix socket %s: %v", *sock, err)
+		}
+
+		sockServer = &http.Server{
+			Handler: srv.Handler(),
+		}
+
+		go func() {
+			log.Printf("management API listening on unix:%s", *sock)
+			if err := sockServer.Serve(listener); err != http.ErrServerClosed {
+				log.Fatalf("unix socket server error: %v", err)
+			}
+		}()
+	}
 
 	// Wait for shutdown signal
 	sigCh := make(chan os.Signal, 1)
@@ -99,7 +129,13 @@ func main() {
 
 	log.Printf("received signal %v, shutting down...", sig)
 	em.StopAll()
-	httpServer.Close()
+	tcpServer.Close()
+	if sockServer != nil {
+		sockServer.Close()
+	}
+	if *sock != "" {
+		os.Remove(*sock)
+	}
 	log.Println("ddld stopped")
 }
 

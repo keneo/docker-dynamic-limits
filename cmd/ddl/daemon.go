@@ -61,6 +61,9 @@ func daemonStartCmd() *cobra.Command {
 				}
 			}
 
+			// Ensure host socket directory exists
+			os.MkdirAll("/var/run/ddl", 0755)
+
 			// Run container
 			fmt.Println("Starting ddl-daemon...")
 			out, err := dockerOutput("run", "-d",
@@ -69,9 +72,11 @@ func daemonStartCmd() *cobra.Command {
 				"-v", "ddl-data:/data",
 				"-v", "/sys/fs/cgroup:/sys/fs/cgroup:ro",
 				"-v", "/var/run/docker.sock:/var/run/docker.sock",
+				"-v", "/var/run/ddl:/run/ddl",
 				"-p", fmt.Sprintf("%d:7123", port),
 				daemonImageName,
 				"-db", "/data/ddl.db",
+				"-sock", "/run/ddl/ddl.sock",
 			)
 			if err != nil {
 				return fmt.Errorf("docker run failed: %w", err)
@@ -82,6 +87,7 @@ func daemonStartCmd() *cobra.Command {
 			}
 
 			// Wait for readiness (up to 3 seconds)
+			// Check both TCP and socket file
 			url := fmt.Sprintf("http://localhost:%d/containers", port)
 			ready := false
 			for i := 0; i < 6; i++ {
@@ -89,7 +95,12 @@ func daemonStartCmd() *cobra.Command {
 				resp, err := http.Get(url)
 				if err == nil {
 					resp.Body.Close()
-					ready = true
+					// Also check that the socket file appeared
+					if _, serr := os.Stat("/var/run/ddl/ddl.sock"); serr == nil {
+						ready = true
+						break
+					}
+					ready = true // TCP is up, socket may take a moment
 					break
 				}
 			}

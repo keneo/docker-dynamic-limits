@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -13,21 +15,52 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var apiURL = "http://localhost:7123"
+var (
+	apiURL     = "http://localhost:7123"
+	sockPath   string
+	httpClient = http.DefaultClient
+)
 
 func init() {
 	if u := os.Getenv("DDL_API_URL"); u != "" {
 		apiURL = u
 	}
+	if s := os.Getenv("DDL_SOCK"); s != "" {
+		sockPath = s
+	}
+}
+
+func setupUnixClient(path string) {
+	httpClient = &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", path)
+			},
+		},
+	}
+	apiURL = "http://localhost" // host is ignored, transport dials socket
 }
 
 func main() {
 	root := &cobra.Command{
 		Use:   "ddl",
 		Short: "Docker Dynamic Limits - manage resource limits on Docker containers",
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			// Determine socket path: explicit flag/env > auto-detect > TCP fallback
+			if sockPath != "" {
+				setupUnixClient(sockPath)
+				return
+			}
+			// Auto-detect default socket location
+			const defaultSock = "/var/run/ddl/ddl.sock"
+			if _, err := os.Stat(defaultSock); err == nil {
+				setupUnixClient(defaultSock)
+			}
+		},
 	}
 
 	root.PersistentFlags().StringVar(&apiURL, "api", apiURL, "ddld API URL")
+	root.PersistentFlags().StringVar(&sockPath, "sock", sockPath, "ddld unix socket path (overrides --api)")
 
 	root.AddCommand(registerCmd())
 	root.AddCommand(limitsCmd())
@@ -176,7 +209,7 @@ func lsCmd() *cobra.Command {
 		Use:   "ls",
 		Short: "List managed containers",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := http.Get(apiURL + "/containers")
+			resp, err := httpClient.Get(apiURL + "/containers")
 			if err != nil {
 				return wrapConnErr(err)
 			}
@@ -222,7 +255,7 @@ func removeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := httpClient.Do(req)
 			if err != nil {
 				return wrapConnErr(err)
 			}
@@ -258,7 +291,7 @@ func setLimit(container, limitType, valueStr, operation string) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return wrapConnErr(err)
 	}
@@ -286,7 +319,7 @@ func setLimit(container, limitType, valueStr, operation string) error {
 
 
 func apiGet(path string) (map[string]interface{}, error) {
-	resp, err := http.Get(apiURL + path)
+	resp, err := httpClient.Get(apiURL + path)
 	if err != nil {
 		return nil, wrapConnErr(err)
 	}
@@ -309,7 +342,7 @@ func apiPost(path string, body interface{}) (map[string]interface{}, error) {
 
 func apiPostPath(path string, body interface{}) (map[string]interface{}, error) {
 	data, _ := json.Marshal(body)
-	resp, err := http.Post(apiURL+path, "application/json", bytes.NewReader(data))
+	resp, err := httpClient.Post(apiURL+path, "application/json", bytes.NewReader(data))
 	if err != nil {
 		return nil, wrapConnErr(err)
 	}

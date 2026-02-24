@@ -13,6 +13,7 @@ RUN CGO_ENABLED=0 go build -o /ddl-guest ./cmd/ddl-guest
 
 FROM alpine:latest
 RUN apk add --no-cache sqlite-libs
+RUN mkdir -p /run/ddl
 COPY --from=build /ddld /ddld
 COPY --from=build /ddl-guest /ddl-guest
 VOLUME /data

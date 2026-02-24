@@ -21,6 +21,16 @@ func newTestServer() (*httptest.Server, *testutil.MockStore, *testutil.MockDocke
 	return ts, ms, md, me, mp
 }
 
+func newReadOnlyTestServer() (*httptest.Server, *testutil.MockStore) {
+	ms := testutil.NewMockStore()
+	md := testutil.NewMockDocker()
+	me := testutil.NewMockEnforcement()
+	mp := testutil.NewMockProxy()
+	srv := NewServer(ms, md, me, mp)
+	ts := httptest.NewServer(srv.ReadOnlyHandler())
+	return ts, ms
+}
+
 func TestListContainersEmpty(t *testing.T) {
 	ts, _, _, _, _ := newTestServer()
 	defer ts.Close()
@@ -397,5 +407,131 @@ func TestMethodNotAllowed(t *testing.T) {
 
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("status = %d, want 405", resp.StatusCode)
+	}
+}
+
+func TestReadOnlyHandlerAllowsGet(t *testing.T) {
+	ts, ms := newReadOnlyTestServer()
+	defer ts.Close()
+
+	dockerID := "abcdef123456789000"
+	c, _ := ms.RegisterContainer(dockerID, "test")
+	ms.SetLimit(c.ID, model.LimitCPU, 3600)
+	ms.SetUsage(c.ID, model.LimitCPU, 10)
+
+	// GET /containers should succeed
+	resp, err := http.Get(ts.URL + "/containers")
+	if err != nil {
+		t.Fatalf("GET /containers: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /containers: status = %d, want 200", resp.StatusCode)
+	}
+
+	// GET /usage?id=... should succeed
+	resp, err = http.Get(ts.URL + "/usage?id=" + c.ID)
+	if err != nil {
+		t.Fatalf("GET /usage: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /usage: status = %d, want 200", resp.StatusCode)
+	}
+
+	// GET /limits?id=... should succeed
+	resp, err = http.Get(ts.URL + "/limits?id=" + c.ID)
+	if err != nil {
+		t.Fatalf("GET /limits: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /limits: status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestReadOnlyHandlerBlocksMutations(t *testing.T) {
+	ts, _ := newReadOnlyTestServer()
+	defer ts.Close()
+
+	// POST /register should return 404 (not registered on read-only mux)
+	body, _ := json.Marshal(map[string]string{"container_id": "test"})
+	resp, err := http.Post(ts.URL+"/register", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /register: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("POST /register: status = %d, want 404", resp.StatusCode)
+	}
+
+	// POST /containers should return 405 (GET-only wrapper)
+	resp, err = http.Post(ts.URL+"/containers", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /containers: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("POST /containers: status = %d, want 405", resp.StatusCode)
+	}
+
+	// DELETE should return 404 (no /containers/ route)
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/containers/test123", nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE /containers/test123: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DELETE /containers/test123: status = %d, want 404", resp.StatusCode)
+	}
+
+	// PUT should return 404 (no /containers/ route)
+	req, _ = http.NewRequest(http.MethodPut, ts.URL+"/containers/test123/limits", nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT /containers/test123/limits: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("PUT /containers/test123/limits: status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestReadOnlyHandlerNoContainerSubroutes(t *testing.T) {
+	ts, ms := newReadOnlyTestServer()
+	defer ts.Close()
+
+	dockerID := "abcdef123456789000"
+	c, _ := ms.RegisterContainer(dockerID, "test")
+
+	// GET /containers/{id}/limits should return 404
+	resp, err := http.Get(ts.URL + "/containers/" + c.ID + "/limits")
+	if err != nil {
+		t.Fatalf("GET /containers/{id}/limits: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /containers/{id}/limits: status = %d, want 404", resp.StatusCode)
+	}
+
+	// GET /containers/{id}/usage should return 404
+	resp, err = http.Get(ts.URL + "/containers/" + c.ID + "/usage")
+	if err != nil {
+		t.Fatalf("GET /containers/{id}/usage: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /containers/{id}/usage: status = %d, want 404", resp.StatusCode)
+	}
+
+	// POST /containers/{id}/clone should return 404
+	resp, err = http.Post(ts.URL+"/containers/"+c.ID+"/clone", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /containers/{id}/clone: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("POST /containers/{id}/clone: status = %d, want 404", resp.StatusCode)
 	}
 }
