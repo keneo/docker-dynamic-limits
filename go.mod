@@ -1,6 +1,6 @@
 module github.com/keneo/docker-dynamic-limits
 
-go 1.18
+go 1.21
 
 require (
 	github.com/docker/docker v20.10.27+incompatible
