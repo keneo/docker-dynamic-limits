@@ -1,3 +1,6 @@
+[![Tests](https://github.com/keneo/docker-dynamic-limits/actions/workflows/test.yml/badge.svg)](https://github.com/keneo/docker-dynamic-limits/actions/workflows/test.yml)
+[![E2E](https://github.com/keneo/docker-dynamic-limits/actions/workflows/e2e.yml/badge.svg)](https://github.com/keneo/docker-dynamic-limits/actions/workflows/e2e.yml)
+
 # docker-dynamic-limits
 
 Dynamic resource limit management for Docker containers. Set, monitor, and enforce cumulative limits on CPU time, RAM, disk, network, I/O, and API spending per container — with automatic enforcement and in-container self-querying.

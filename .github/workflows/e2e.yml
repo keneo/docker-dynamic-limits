@@ -1,0 +1,36 @@
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  dind-e2e:
+    name: Docker-in-Docker E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build E2E Docker image
+        run: docker build -t ddl-e2e -f e2e/Dockerfile .
+
+      - name: Run E2E tests
+        run: docker run --privileged ddl-e2e
+
+  cli-proxy-e2e:
+    name: CLI Proxy E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc python3 curl jq
+
+      - name: Run CLI proxy E2E tests
+        run: bash e2e/cli_proxy_test.sh

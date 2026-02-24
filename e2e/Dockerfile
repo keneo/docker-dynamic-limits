@@ -1,5 +1,5 @@
 # Stage 1: Build ddld binary and e2e test binary
-FROM golang:1.22-alpine AS build
+FROM golang:1.21-alpine AS build
 
 RUN apk add --no-cache gcc musl-dev
 
