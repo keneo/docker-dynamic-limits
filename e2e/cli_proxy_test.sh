@@ -189,7 +189,7 @@ done
 # ── Start ddld ──────────────────────────────────────────────────────────────
 echo "${BOLD}Starting ddld on port $API_PORT...${RESET}"
 DDL_PROXY_RESOLVE="api.openai.com=127.0.0.1,api.anthropic.com=127.0.0.1" \
-    "$TMPBIN/ddld" -addr ":$API_PORT" -db "$TMPDIR/ddl.db" \
+    "$TMPBIN/ddld" -addr ":$API_PORT" -db "$TMPDIR/ddl.db" -sock "" \
     >"$TMPDIR/ddld.stdout" 2>"$TMPDIR/ddld.stderr" &
 DDLD_PID=$!
 

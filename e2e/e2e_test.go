@@ -52,8 +52,8 @@ func runTests(m *testing.M) int {
 	addr := fmt.Sprintf(":%d", port)
 	daemonURL = fmt.Sprintf("http://127.0.0.1:%d", port)
 
-	// Start ddld subprocess
-	daemonCmd = exec.Command(ddldPath, "-addr", addr, "-db", dbPath)
+	// Start ddld subprocess (disable unix socket so tests use full TCP API)
+	daemonCmd = exec.Command(ddldPath, "-addr", addr, "-db", dbPath, "-sock", "")
 	daemonCmd.Stdout = os.Stdout
 	daemonCmd.Stderr = os.Stderr
 	if err := daemonCmd.Start(); err != nil {
