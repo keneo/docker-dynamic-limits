@@ -24,6 +24,7 @@ type DockerClient interface {
 	GetContainerDiskUsage(ctx context.Context, id string) (int64, error)
 	DisconnectNetwork(ctx context.Context, id string) error
 	ReconnectNetwork(ctx context.Context, id string) error
+	ContainerIP(ctx context.Context, id string) (string, error)
 }
 
 // Client wraps the Docker Engine API.
@@ -210,4 +211,21 @@ func (c *Client) DisconnectNetwork(ctx context.Context, id string) error {
 // ReconnectNetwork reconnects a container to the bridge network.
 func (c *Client) ReconnectNetwork(ctx context.Context, id string) error {
 	return c.cli.NetworkConnect(ctx, "bridge", id, nil)
+}
+
+// ContainerIP returns the IP address of a container.
+func (c *Client) ContainerIP(ctx context.Context, id string) (string, error) {
+	info, err := c.cli.ContainerInspect(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if ip := info.NetworkSettings.IPAddress; ip != "" {
+		return ip, nil
+	}
+	for _, net := range info.NetworkSettings.Networks {
+		if net.IPAddress != "" {
+			return net.IPAddress, nil
+		}
+	}
+	return "", fmt.Errorf("no IP address for container %s", id)
 }

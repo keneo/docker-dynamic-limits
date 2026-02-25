@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/keneo/docker-dynamic-limits/internal/docker"
 	"github.com/keneo/docker-dynamic-limits/internal/enforcement"
@@ -22,6 +25,10 @@ type Server struct {
 	enforcement enforcement.EnforcementController
 	proxy       proxy.SpendingProxy
 	mux         *http.ServeMux
+
+	ipMu  sync.RWMutex
+	ipMap map[string]string // IP → containerID
+	done  chan struct{}
 }
 
 // NewServer creates a new API server.
@@ -32,9 +39,18 @@ func NewServer(st store.DataStore, dc docker.DockerClient, em enforcement.Enforc
 		enforcement: em,
 		proxy:       px,
 		mux:         http.NewServeMux(),
+		ipMap:       make(map[string]string),
+		done:        make(chan struct{}),
 	}
 	s.registerRoutes()
+	s.refreshIPs()
+	go s.ipRefreshLoop()
 	return s
+}
+
+// Stop shuts down the background IP refresh goroutine.
+func (s *Server) Stop() {
+	close(s.done)
 }
 
 func (s *Server) registerRoutes() {
@@ -53,11 +69,12 @@ func (s *Server) Handler() http.Handler {
 
 // ReadOnlyHandler returns an HTTP handler with only read-only, guest-facing routes.
 // This is intended for the TCP listener that containers can reach.
+// Container identification is done via source IP resolution.
 func (s *Server) ReadOnlyHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/containers", s.handleContainersReadOnly)
-	mux.HandleFunc("/usage", s.handleSelfUsage)
-	mux.HandleFunc("/limits", s.handleSelfLimits)
+	mux.HandleFunc("/usage", s.handleSelfUsageByIP)
+	mux.HandleFunc("/limits", s.handleSelfLimitsByIP)
 	return mux
 }
 
@@ -372,6 +389,106 @@ func (s *Server) handleSelfLimits(w http.ResponseWriter, r *http.Request) {
 	containerID := s.resolveContainerFromRequest(r)
 	if containerID == "" {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("cannot identify container; use ?id=<container_id> or X-Container-ID header"))
+		return
+	}
+
+	limits, err := s.store.GetAllLimits(containerID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	writeJSON(w, limits)
+}
+
+func (s *Server) ipRefreshLoop() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			s.refreshIPs()
+		}
+	}
+}
+
+func (s *Server) refreshIPs() {
+	containers, err := s.store.ListContainers()
+	if err != nil {
+		log.Printf("[api] refreshIPs: list containers: %v", err)
+		return
+	}
+	newMap := make(map[string]string, len(containers))
+	ctx := context.Background()
+	for _, c := range containers {
+		ip, err := s.docker.ContainerIP(ctx, c.DockerID)
+		if err != nil {
+			continue
+		}
+		newMap[ip] = c.ID
+	}
+	s.ipMu.Lock()
+	s.ipMap = newMap
+	s.ipMu.Unlock()
+}
+
+func (s *Server) resolveContainerByIP(ip string) string {
+	s.ipMu.RLock()
+	defer s.ipMu.RUnlock()
+	return s.ipMap[ip]
+}
+
+func extractIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
+}
+
+func (s *Server) handleSelfUsageByIP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ip := extractIP(r.RemoteAddr)
+	containerID := s.resolveContainerByIP(ip)
+	if containerID == "" {
+		writeError(w, http.StatusForbidden, fmt.Errorf("unknown container"))
+		return
+	}
+
+	usage, err := s.store.GetAllUsage(containerID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	limits, err := s.store.GetAllLimits(containerID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"usage":  usage,
+		"limits": limits,
+	})
+}
+
+func (s *Server) handleSelfLimitsByIP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ip := extractIP(r.RemoteAddr)
+	containerID := s.resolveContainerByIP(ip)
+	if containerID == "" {
+		writeError(w, http.StatusForbidden, fmt.Errorf("unknown container"))
 		return
 	}
 

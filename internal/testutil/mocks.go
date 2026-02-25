@@ -190,6 +190,7 @@ type MockContainerState struct {
 	Networks    []string
 	DiskUsage   int64
 	Name        string
+	IP          string
 }
 
 func NewMockDocker() *MockDocker {
@@ -334,6 +335,27 @@ func (d *MockDocker) ReconnectNetwork(ctx context.Context, id string) error {
 	}
 	state.Networks = []string{"bridge"}
 	return nil
+}
+
+func (d *MockDocker) ContainerIP(ctx context.Context, id string) (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	state, ok := d.Containers[id]
+	if !ok {
+		return "", fmt.Errorf("container %s not found", id)
+	}
+	if state.IP == "" {
+		return "", fmt.Errorf("no IP address for container %s", id)
+	}
+	return state.IP, nil
+}
+
+func (d *MockDocker) SetContainerIP(id, ip string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if state, ok := d.Containers[id]; ok {
+		state.IP = ip
+	}
 }
 
 // --- MockCgroup ---

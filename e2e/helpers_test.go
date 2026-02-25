@@ -91,30 +91,6 @@ func apiGet(t *testing.T, path string, out interface{}) {
 	}
 }
 
-// apiGetWithHeader performs a GET request with a custom header.
-func apiGetWithHeader(t *testing.T, path string, headerKey, headerVal string, out interface{}) {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, daemonURL+path, nil)
-	if err != nil {
-		t.Fatalf("failed to create request: %v", err)
-	}
-	req.Header.Set(headerKey, headerVal)
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		t.Fatalf("GET %s failed: %v", path, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("GET %s returned %d: %s", path, resp.StatusCode, string(body))
-	}
-	if out != nil {
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-			t.Fatalf("GET %s decode error: %v", path, err)
-		}
-	}
-}
-
 // apiPost performs a POST request with JSON body and decodes the response.
 func apiPost(t *testing.T, path string, body interface{}, out interface{}) {
 	t.Helper()

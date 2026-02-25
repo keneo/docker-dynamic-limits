@@ -20,19 +20,13 @@ func main() {
 	jsonFlag := flag.Bool("json", false, "output raw JSON")
 	flag.Parse()
 
-	containerID, err := resolveContainerID()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
 	apiURL, err := resolveAPIURL(defaultCandidates)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
-	body, err := fetchStatus(apiURL, containerID)
+	body, err := fetchStatus(apiURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -41,19 +35,9 @@ func main() {
 	if *jsonFlag {
 		printJSON(os.Stdout, body)
 	} else {
-		printStatus(os.Stdout, containerID, body)
+		hostname, _ := os.Hostname()
+		printStatus(os.Stdout, hostname, body)
 	}
-}
-
-func resolveContainerID() (string, error) {
-	if id := os.Getenv("DDL_CONTAINER_ID"); id != "" {
-		return id, nil
-	}
-	hostname, err := os.Hostname()
-	if err != nil {
-		return "", fmt.Errorf("cannot determine container ID: %w", err)
-	}
-	return hostname, nil
 }
 
 func resolveAPIURL(candidates []string) (string, error) {
@@ -72,8 +56,8 @@ func resolveAPIURL(candidates []string) (string, error) {
 	return "", fmt.Errorf("cannot reach ddld API; set DDL_API_URL or ensure ddld is running")
 }
 
-func fetchStatus(apiURL, containerID string) (map[string]interface{}, error) {
-	resp, err := http.Get(apiURL + "/usage?id=" + containerID)
+func fetchStatus(apiURL string) (map[string]interface{}, error) {
+	resp, err := http.Get(apiURL + "/usage")
 	if err != nil {
 		return nil, fmt.Errorf("API request failed: %w", err)
 	}

@@ -6,33 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 )
-
-func TestResolveContainerID_EnvVar(t *testing.T) {
-	t.Setenv("DDL_CONTAINER_ID", "my-container-123")
-	id, err := resolveContainerID()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id != "my-container-123" {
-		t.Errorf("got %q, want %q", id, "my-container-123")
-	}
-}
-
-func TestResolveContainerID_Hostname(t *testing.T) {
-	t.Setenv("DDL_CONTAINER_ID", "")
-	id, err := resolveContainerID()
-	if err != nil {
-		t.Fatal(err)
-	}
-	hostname, _ := os.Hostname()
-	if id != hostname {
-		t.Errorf("got %q, want hostname %q", id, hostname)
-	}
-}
 
 func TestResolveAPIURL_EnvVar(t *testing.T) {
 	t.Setenv("DDL_API_URL", "http://custom:9999")
@@ -78,15 +54,12 @@ func TestFetchStatus(t *testing.T) {
 		if r.URL.Path != "/usage" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		if r.URL.Query().Get("id") != "abc123" {
-			t.Errorf("unexpected id param: %s", r.URL.Query().Get("id"))
-		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"usage":{"cpu":330,"ram":134217728},"limits":{"cpu":3600,"ram":536870912}}`)
 	}))
 	defer srv.Close()
 
-	body, err := fetchStatus(srv.URL, "abc123")
+	body, err := fetchStatus(srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +78,7 @@ func TestFetchStatus_ErrorStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := fetchStatus(srv.URL, "unknown")
+	_, err := fetchStatus(srv.URL)
 	if err == nil {
 		t.Fatal("expected error for 404 response")
 	}

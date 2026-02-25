@@ -21,14 +21,14 @@ func newTestServer() (*httptest.Server, *testutil.MockStore, *testutil.MockDocke
 	return ts, ms, md, me, mp
 }
 
-func newReadOnlyTestServer() (*httptest.Server, *testutil.MockStore) {
+func newReadOnlyTestServer() (*httptest.Server, *testutil.MockStore, *testutil.MockDocker, *Server) {
 	ms := testutil.NewMockStore()
 	md := testutil.NewMockDocker()
 	me := testutil.NewMockEnforcement()
 	mp := testutil.NewMockProxy()
 	srv := NewServer(ms, md, me, mp)
 	ts := httptest.NewServer(srv.ReadOnlyHandler())
-	return ts, ms
+	return ts, ms, md, srv
 }
 
 func TestListContainersEmpty(t *testing.T) {
@@ -411,13 +411,19 @@ func TestMethodNotAllowed(t *testing.T) {
 }
 
 func TestReadOnlyHandlerAllowsGet(t *testing.T) {
-	ts, ms := newReadOnlyTestServer()
+	ts, ms, md, srv := newReadOnlyTestServer()
 	defer ts.Close()
+	defer srv.Stop()
 
 	dockerID := "abcdef123456789000"
+	md.AddContainer(dockerID, "test", true)
+	md.SetContainerIP(dockerID, "127.0.0.1")
 	c, _ := ms.RegisterContainer(dockerID, "test")
 	ms.SetLimit(c.ID, model.LimitCPU, 3600)
 	ms.SetUsage(c.ID, model.LimitCPU, 10)
+
+	// Refresh IP map so the server knows about our container
+	srv.refreshIPs()
 
 	// GET /containers should succeed
 	resp, err := http.Get(ts.URL + "/containers")
@@ -429,8 +435,8 @@ func TestReadOnlyHandlerAllowsGet(t *testing.T) {
 		t.Errorf("GET /containers: status = %d, want 200", resp.StatusCode)
 	}
 
-	// GET /usage?id=... should succeed
-	resp, err = http.Get(ts.URL + "/usage?id=" + c.ID)
+	// GET /usage should succeed (resolved by source IP)
+	resp, err = http.Get(ts.URL + "/usage")
 	if err != nil {
 		t.Fatalf("GET /usage: %v", err)
 	}
@@ -439,8 +445,8 @@ func TestReadOnlyHandlerAllowsGet(t *testing.T) {
 		t.Errorf("GET /usage: status = %d, want 200", resp.StatusCode)
 	}
 
-	// GET /limits?id=... should succeed
-	resp, err = http.Get(ts.URL + "/limits?id=" + c.ID)
+	// GET /limits should succeed (resolved by source IP)
+	resp, err = http.Get(ts.URL + "/limits")
 	if err != nil {
 		t.Fatalf("GET /limits: %v", err)
 	}
@@ -450,9 +456,33 @@ func TestReadOnlyHandlerAllowsGet(t *testing.T) {
 	}
 }
 
-func TestReadOnlyHandlerBlocksMutations(t *testing.T) {
-	ts, _ := newReadOnlyTestServer()
+func TestReadOnlyIPResolutionUnknownIP(t *testing.T) {
+	ts, ms, md, srv := newReadOnlyTestServer()
 	defer ts.Close()
+	defer srv.Stop()
+
+	dockerID := "abcdef123456789000"
+	md.AddContainer(dockerID, "test", true)
+	md.SetContainerIP(dockerID, "10.0.0.99") // different from 127.0.0.1
+	ms.RegisterContainer(dockerID, "test")
+
+	srv.refreshIPs()
+
+	// GET /usage from 127.0.0.1 should return 403 (unknown container)
+	resp, err := http.Get(ts.URL + "/usage")
+	if err != nil {
+		t.Fatalf("GET /usage: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("GET /usage: status = %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestReadOnlyHandlerBlocksMutations(t *testing.T) {
+	ts, _, _, srv := newReadOnlyTestServer()
+	defer ts.Close()
+	defer srv.Stop()
 
 	// POST /register should return 404 (not registered on read-only mux)
 	body, _ := json.Marshal(map[string]string{"container_id": "test"})
@@ -499,8 +529,9 @@ func TestReadOnlyHandlerBlocksMutations(t *testing.T) {
 }
 
 func TestReadOnlyHandlerNoContainerSubroutes(t *testing.T) {
-	ts, ms := newReadOnlyTestServer()
+	ts, ms, _, srv := newReadOnlyTestServer()
 	defer ts.Close()
+	defer srv.Stop()
 
 	dockerID := "abcdef123456789000"
 	c, _ := ms.RegisterContainer(dockerID, "test")

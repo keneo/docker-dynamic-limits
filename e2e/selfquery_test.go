@@ -59,19 +59,3 @@ func TestSelfQueryLimits(t *testing.T) {
 	}
 }
 
-func TestSelfQueryWithHeader(t *testing.T) {
-	name := uniqueName("e2e-sqhdr")
-	dockerID := createIdleContainer(t, name)
-
-	containerID := registerContainer(t, dockerID)
-
-	setLimit(t, containerID, "cpu", 5000)
-
-	// Query using X-Container-ID header instead of query parameter
-	var limits map[string]interface{}
-	apiGetWithHeader(t, "/limits", "X-Container-ID", containerID, &limits)
-
-	if cpuLimit, ok := limits["cpu"].(float64); !ok || int64(cpuLimit) != 5000 {
-		t.Fatalf("expected cpu limit=5000, got %v", limits["cpu"])
-	}
-}

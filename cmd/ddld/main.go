@@ -128,6 +128,7 @@ func main() {
 	sig := <-sigCh
 
 	log.Printf("received signal %v, shutting down...", sig)
+	srv.Stop()
 	em.StopAll()
 	tcpServer.Close()
 	if sockServer != nil {
