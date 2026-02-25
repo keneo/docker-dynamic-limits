@@ -181,7 +181,8 @@ func usageCmd() *cobra.Command {
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 			fmt.Fprintf(w, "TYPE\tUSAGE\tLIMIT\tSTATUS\n")
-			types := []string{"cpu", "ram", "net", "disk", "disk-io-bytes", "disk-io-ops", "spending"}
+			types := []string{"cpu", "ram", "net", "disk", "disk-io-bytes", "disk-io-ops", "spending",
+				"ram-usage-bsec", "disk-usage-bsec", "ram-request-bsec", "disk-request-bsec"}
 			for _, t := range types {
 				u := getJSONFloat(usage, t)
 				l := getJSONFloat(limits, t)
