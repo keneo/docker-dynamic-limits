@@ -41,12 +41,22 @@ func setupUnixClient(path string) {
 	apiURL = "http://localhost" // host is ignored, transport dials socket
 }
 
+func setupDockerExecClient() {
+	httpClient = &http.Client{
+		Transport: &dockerExecTransport{
+			containerName: daemonContainerName,
+			socketPath:    "/run/ddl/ddl.sock",
+		},
+	}
+	apiURL = "http://localhost"
+}
+
 func main() {
 	root := &cobra.Command{
 		Use:   "ddl",
 		Short: "Docker Dynamic Limits - manage resource limits on Docker containers",
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
-			// Determine socket path: explicit flag/env > auto-detect > TCP fallback
+			// Determine socket path: explicit flag/env > auto-detect > docker exec fallback > TCP
 			if sockPath != "" {
 				setupUnixClient(sockPath)
 				return
@@ -55,6 +65,12 @@ func main() {
 			const defaultSock = "/var/run/ddl/ddl.sock"
 			if _, err := os.Stat(defaultSock); err == nil {
 				setupUnixClient(defaultSock)
+				return
+			}
+			// Socket not available locally (e.g. macOS Docker Desktop);
+			// fall back to docker exec if the daemon container is running.
+			if state, _ := inspectContainerState(daemonContainerName); state == "running" {
+				setupDockerExecClient()
 			}
 		},
 	}

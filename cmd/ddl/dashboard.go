@@ -12,7 +12,9 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -21,6 +23,8 @@ import (
 
 //go:embed dashboard/*
 var dashboardFS embed.FS
+
+var dashboardPidFile = filepath.Join(os.TempDir(), "ddl-dashboard.pid")
 
 func dashboardCmd() *cobra.Command {
 	var listen string
@@ -37,7 +41,51 @@ func dashboardCmd() *cobra.Command {
 	cmd.Flags().StringVar(&listen, "listen", ":7124", "address to listen on")
 	cmd.Flags().BoolVar(&open, "open", false, "open browser automatically")
 
+	cmd.AddCommand(dashboardStopCmd())
+
 	return cmd
+}
+
+func dashboardStopCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop",
+		Short: "Stop the running dashboard",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			data, err := os.ReadFile(dashboardPidFile)
+			if err != nil {
+				fmt.Println("Dashboard is not running (no PID file)")
+				return nil
+			}
+			pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+			if err != nil {
+				os.Remove(dashboardPidFile)
+				fmt.Println("Dashboard is not running (invalid PID file)")
+				return nil
+			}
+			proc, err := os.FindProcess(pid)
+			if err != nil {
+				os.Remove(dashboardPidFile)
+				fmt.Println("Dashboard is not running")
+				return nil
+			}
+			if err := proc.Signal(syscall.SIGTERM); err != nil {
+				os.Remove(dashboardPidFile)
+				fmt.Println("Dashboard is not running")
+				return nil
+			}
+			os.Remove(dashboardPidFile)
+			fmt.Println("Dashboard stopped")
+			return nil
+		},
+	}
+}
+
+func writePidFile() {
+	os.WriteFile(dashboardPidFile, []byte(strconv.Itoa(os.Getpid())), 0644)
+}
+
+func removePidFile() {
+	os.Remove(dashboardPidFile)
 }
 
 func buildDashboardHandler(backendURL string) (http.Handler, error) {
@@ -47,6 +95,9 @@ func buildDashboardHandler(backendURL string) (http.Handler, error) {
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	if httpClient.Transport != nil {
+		proxy.Transport = httpClient.Transport
+	}
 
 	subFS, err := fs.Sub(dashboardFS, "dashboard")
 	if err != nil {
@@ -84,6 +135,9 @@ func runDashboard(listen string, open bool) error {
 	dashURL := fmt.Sprintf("http://localhost:%d", ln.Addr().(*net.TCPAddr).Port)
 	fmt.Printf("Dashboard: %s\n", dashURL)
 	fmt.Printf("API proxy: %s -> %s\n", addr, apiURL)
+
+	writePidFile()
+	defer removePidFile()
 
 	if open {
 		openBrowser(dashURL)
