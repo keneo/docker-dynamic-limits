@@ -147,6 +147,17 @@ main {
     margin: 0 auto;
 }
 
+.offline-banner {
+    background: var(--danger);
+    color: white;
+    text-align: center;
+    padding: 10px 16px;
+    border-radius: 6px;
+    margin-bottom: 16px;
+    font-size: 14px;
+    font-weight: 500;
+}
+
 table {
     width: 100%;
     border-collapse: collapse;

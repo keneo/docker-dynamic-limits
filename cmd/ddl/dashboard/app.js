@@ -16,6 +16,7 @@
     const lastRefreshEl = document.getElementById('last-refresh');
     const refreshSelect = document.getElementById('refresh-interval');
     const toastContainer = document.getElementById('toast-container');
+    const offlineBanner = document.getElementById('offline-banner');
 
     // --- Value formatting (mirrors Go format.go) ---
     const LIMIT_TYPES = ['cpu', 'ram', 'net', 'disk', 'disk-io-bytes', 'disk-io-ops', 'spending'];
@@ -254,12 +255,14 @@
     function refresh() {
         api('GET', '/containers').then(function (data) {
             containers = data || [];
+            offlineBanner.hidden = true;
             statusIndicator.className = 'status connected';
             statusIndicator.title = 'Connected';
             lastRefreshEl.textContent = new Date().toLocaleTimeString();
             renderContainers();
             renderDetail();
         }).catch(function (err) {
+            offlineBanner.hidden = false;
             statusIndicator.className = 'status disconnected';
             statusIndicator.title = 'Disconnected: ' + err.message;
         });
