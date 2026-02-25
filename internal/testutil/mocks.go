@@ -235,6 +235,9 @@ func (d *MockDocker) PauseContainer(ctx context.Context, id string) error {
 	if !ok {
 		return fmt.Errorf("container %s not found", id)
 	}
+	if state.Paused {
+		return fmt.Errorf("Error response from daemon: Container %s is already paused", id)
+	}
 	state.Paused = true
 	return nil
 }

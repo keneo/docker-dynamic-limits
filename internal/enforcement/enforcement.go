@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -162,6 +163,12 @@ func (m *Manager) checkAndEnforce(ctx context.Context, containerID, dockerID str
 			m.enforce(ctx, containerID, dockerID, lt, cgroupPath)
 		} else if !exceeded && wasEnforced {
 			m.release(ctx, containerID, dockerID, lt, cgroupPath)
+		} else if !exceeded && !wasEnforced {
+			// Reconcile: after daemon restart, in-memory state is lost but the
+			// container may still be in an enforced state from the previous run.
+			if m.isActuallyEnforced(ctx, dockerID, lt) {
+				m.release(ctx, containerID, dockerID, lt, cgroupPath)
+			}
 		}
 	}
 }
@@ -234,6 +241,8 @@ func (m *Manager) enforce(ctx context.Context, containerID, dockerID string, lt 
 		err = m.docker.PauseContainer(ctx, dockerID)
 		if err == nil {
 			log.Printf("[enforcement] paused container %s: CPU limit exceeded", containerID)
+		} else if strings.Contains(err.Error(), "already paused") {
+			err = nil // already in desired state
 		}
 
 	case model.LimitRAM:
@@ -248,6 +257,8 @@ func (m *Manager) enforce(ctx context.Context, containerID, dockerID string, lt 
 		err = m.docker.PauseContainer(ctx, dockerID)
 		if err == nil {
 			log.Printf("[enforcement] paused container %s: disk limit exceeded", containerID)
+		} else if strings.Contains(err.Error(), "already paused") {
+			err = nil // already in desired state
 		}
 
 	case model.LimitNetwork:
@@ -342,6 +353,18 @@ func (m *Manager) release(ctx context.Context, containerID, dockerID string, lt 
 		m.enforced[containerID][lt] = false
 	}
 	m.mu.Unlock()
+}
+
+// isActuallyEnforced checks the real container state to detect enforcement
+// from a previous daemon instance (whose in-memory state was lost on restart).
+func (m *Manager) isActuallyEnforced(ctx context.Context, dockerID string, lt model.LimitType) bool {
+	switch lt {
+	case model.LimitCPU, model.LimitDisk:
+		paused, err := m.docker.IsContainerPaused(ctx, dockerID)
+		return err == nil && paused
+	default:
+		return false
+	}
 }
 
 // isOtherPauseActive checks if another limit type that uses pause is also enforced.

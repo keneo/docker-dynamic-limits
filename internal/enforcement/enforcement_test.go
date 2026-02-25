@@ -187,6 +187,79 @@ func TestStartAllStopAll(t *testing.T) {
 	}
 }
 
+func TestEnforcementAlreadyPaused(t *testing.T) {
+	// Bug fix: when a container is already paused (e.g. from a previous daemon),
+	// enforce() should treat "already paused" as success and set the enforced flag.
+	// This ensures that if the limit is later increased, release() will fire.
+	m, ms, md, mc, _ := newTestManager()
+
+	dockerID := "abcdef123456789000"
+	containerID := dockerID[:12]
+
+	md.AddContainer(dockerID, "test", true)
+	ms.RegisterContainer(dockerID, "test")
+	ms.SetLimit(containerID, model.LimitCPU, 100) // 100 seconds
+
+	cgPath := "/cgroup/test"
+	mc.CgroupPaths[dockerID] = cgPath
+	mc.CPUUsage[cgPath] = 200_000_000 // 200 seconds (exceeds limit)
+
+	// Pre-pause the container (simulates previous daemon enforcement)
+	md.PauseContainer(nil, dockerID)
+
+	m.StartContainer(containerID, dockerID)
+	time.Sleep(200 * time.Millisecond)
+
+	// The enforced flag should be set despite "already paused" error
+	// (check before StopContainer which clears the map)
+	if !m.IsEnforced(containerID, model.LimitCPU) {
+		t.Error("CPU should be marked as enforced even when container was already paused")
+	}
+
+	// Now increase the limit so usage < limit → should release
+	ms.SetLimit(containerID, model.LimitCPU, 7200) // 2 hours
+	time.Sleep(200 * time.Millisecond)
+	m.StopContainer(containerID)
+
+	paused, _ := md.IsContainerPaused(nil, dockerID)
+	if paused {
+		t.Error("container should be unpaused after limit was increased above usage")
+	}
+}
+
+func TestEnforcementReconcileAfterRestart(t *testing.T) {
+	// Bug fix: after daemon restart, in-memory enforced state is lost.
+	// If the container is paused but usage is now below the limit (e.g. limit
+	// was increased), the enforcement loop should detect the paused state and
+	// release the container.
+	m, ms, md, mc, _ := newTestManager()
+
+	dockerID := "abcdef123456789000"
+	containerID := dockerID[:12]
+
+	md.AddContainer(dockerID, "test", true)
+	ms.RegisterContainer(dockerID, "test")
+	ms.SetLimit(containerID, model.LimitCPU, 7200) // 2 hours
+
+	cgPath := "/cgroup/test"
+	mc.CgroupPaths[dockerID] = cgPath
+	mc.CPUUsage[cgPath] = 1800_000_000 // 30 minutes (below 2h limit)
+
+	// Pre-pause the container (simulates previous daemon enforcement)
+	md.PauseContainer(nil, dockerID)
+
+	// enforced map is empty (simulates daemon restart)
+	m.StartContainer(containerID, dockerID)
+	time.Sleep(200 * time.Millisecond)
+	m.StopContainer(containerID)
+
+	// Container should be unpaused since usage < limit
+	paused, _ := md.IsContainerPaused(nil, dockerID)
+	if paused {
+		t.Error("container should be unpaused after reconciliation (usage below limit)")
+	}
+}
+
 func TestIsOtherPauseActive(t *testing.T) {
 	m, _, _, _, _ := newTestManager()
 
