@@ -146,13 +146,27 @@ func (m *Manager) checkAndEnforce(ctx context.Context, containerID, dockerID str
 			continue
 		}
 
-		usage, err := m.getCurrentUsage(ctx, containerID, dockerID, lt, cgroupPath, cgroupErr)
-		if err != nil {
-			continue
-		}
+		var usage int64
+		if isByteSecondType(lt) {
+			// Don't accumulate if already enforced (container killed)
+			m.mu.Lock()
+			wasEnforced := m.enforced[containerID][lt]
+			m.mu.Unlock()
 
-		// Persist usage to store
-		m.store.SetUsage(containerID, lt, usage)
+			if !wasEnforced {
+				source := m.getByteSecondSource(ctx, containerID, dockerID, lt, limits, cgroupPath, cgroupErr)
+				m.store.AddUsage(containerID, lt, source)
+			}
+			usage, _ = m.store.GetUsage(containerID, lt)
+		} else {
+			var err error
+			usage, err = m.getCurrentUsage(ctx, containerID, dockerID, lt, cgroupPath, cgroupErr)
+			if err != nil {
+				continue
+			}
+			// Persist usage to store
+			m.store.SetUsage(containerID, lt, usage)
+		}
 
 		exceeded := usage >= limit
 		m.mu.Lock()
@@ -234,6 +248,44 @@ func (m *Manager) getCurrentUsage(ctx context.Context, containerID, dockerID str
 	}
 }
 
+// isByteSecondType returns true for cumulative byte-second limit types.
+func isByteSecondType(lt model.LimitType) bool {
+	switch lt {
+	case model.LimitRAMUsageBSec, model.LimitDiskUsageBSec,
+		model.LimitRAMRequestBSec, model.LimitDiskRequestBSec:
+		return true
+	}
+	return false
+}
+
+// getByteSecondSource returns the current source value to accumulate for a byte-second type.
+func (m *Manager) getByteSecondSource(ctx context.Context, containerID, dockerID string, lt model.LimitType, limits map[model.LimitType]int64, cgroupPath string, cgroupErr error) int64 {
+	switch lt {
+	case model.LimitRAMUsageBSec:
+		if cgroupErr != nil {
+			return 0
+		}
+		v, err := m.cgroup.MemoryCurrent(cgroupPath)
+		if err != nil {
+			return 0
+		}
+		return v
+	case model.LimitDiskUsageBSec:
+		v, err := m.docker.GetContainerDiskUsage(ctx, dockerID)
+		if err != nil {
+			return 0
+		}
+		return v
+	case model.LimitRAMRequestBSec:
+		v, _ := m.store.GetLimit(containerID, model.LimitRAM)
+		return v
+	case model.LimitDiskRequestBSec:
+		v, _ := m.store.GetLimit(containerID, model.LimitDisk)
+		return v
+	}
+	return 0
+}
+
 func (m *Manager) enforce(ctx context.Context, containerID, dockerID string, lt model.LimitType, cgroupPath string) {
 	var err error
 	switch lt {
@@ -279,6 +331,13 @@ func (m *Manager) enforce(ctx context.Context, containerID, dockerID string, lt 
 	case model.LimitSpending:
 		// Spending enforcement is handled by the proxy itself
 		log.Printf("[enforcement] spending limit exceeded for %s", containerID)
+
+	case model.LimitRAMUsageBSec, model.LimitDiskUsageBSec,
+		model.LimitRAMRequestBSec, model.LimitDiskRequestBSec:
+		err = m.docker.StopContainer(ctx, dockerID)
+		if err == nil {
+			log.Printf("[enforcement] killed container %s: %s limit exceeded", containerID, lt)
+		}
 	}
 
 	if err != nil {
@@ -341,6 +400,12 @@ func (m *Manager) release(ctx context.Context, containerID, dockerID string, lt 
 
 	case model.LimitSpending:
 		log.Printf("[enforcement] spending limit released for %s", containerID)
+
+	case model.LimitRAMUsageBSec, model.LimitDiskUsageBSec,
+		model.LimitRAMRequestBSec, model.LimitDiskRequestBSec:
+		// Container was killed; if user increased the limit and restarted
+		// the container, just clear the enforced flag (no Docker action needed).
+		log.Printf("[enforcement] %s limit released for %s (container may be restarted)", lt, containerID)
 	}
 
 	if err != nil {

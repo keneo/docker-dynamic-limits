@@ -4,13 +4,17 @@ import "testing"
 
 func TestAllLimitTypesCompleteness(t *testing.T) {
 	known := map[LimitType]bool{
-		LimitCPU:        true,
-		LimitRAM:        true,
-		LimitDisk:       true,
-		LimitNetwork:    true,
-		LimitDiskIOByte: true,
-		LimitDiskIOOps:  true,
-		LimitSpending:   true,
+		LimitCPU:             true,
+		LimitRAM:             true,
+		LimitDisk:            true,
+		LimitNetwork:         true,
+		LimitDiskIOByte:      true,
+		LimitDiskIOOps:       true,
+		LimitSpending:        true,
+		LimitRAMUsageBSec:    true,
+		LimitDiskUsageBSec:   true,
+		LimitRAMRequestBSec:  true,
+		LimitDiskRequestBSec: true,
 	}
 
 	if len(AllLimitTypes) != len(known) {
@@ -36,6 +40,10 @@ func TestLimitTypeStringValues(t *testing.T) {
 		{LimitDiskIOByte, "disk-io-bytes"},
 		{LimitDiskIOOps, "disk-io-ops"},
 		{LimitSpending, "spending"},
+		{LimitRAMUsageBSec, "ram-usage-bsec"},
+		{LimitDiskUsageBSec, "disk-usage-bsec"},
+		{LimitRAMRequestBSec, "ram-request-bsec"},
+		{LimitDiskRequestBSec, "disk-request-bsec"},
 	}
 
 	for _, tc := range tests {

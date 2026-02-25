@@ -19,7 +19,8 @@
     const offlineBanner = document.getElementById('offline-banner');
 
     // --- Value formatting (mirrors Go format.go) ---
-    const LIMIT_TYPES = ['cpu', 'ram', 'net', 'disk', 'disk-io-bytes', 'disk-io-ops', 'spending'];
+    const LIMIT_TYPES = ['cpu', 'ram', 'net', 'disk', 'disk-io-bytes', 'disk-io-ops', 'spending',
+        'ram-usage-bsec', 'disk-usage-bsec', 'ram-request-bsec', 'disk-request-bsec'];
 
     const LIMIT_LABELS = {
         'cpu': 'CPU',
@@ -28,8 +29,24 @@
         'net': 'Network',
         'disk-io-bytes': 'Disk I/O Bytes',
         'disk-io-ops': 'Disk I/O Ops',
-        'spending': 'Spending'
+        'spending': 'Spending',
+        'ram-usage-bsec': 'RAM Usage B·s',
+        'disk-usage-bsec': 'Disk Usage B·s',
+        'ram-request-bsec': 'RAM Request B·s',
+        'disk-request-bsec': 'Disk Request B·s'
     };
+
+    function formatByteSeconds(b) {
+        var TB = 1024 * 1024 * 1024 * 1024;
+        var GB = 1024 * 1024 * 1024;
+        var MB = 1024 * 1024;
+        var KB = 1024;
+        if (b >= TB) return (b / TB).toFixed(1) + 'T\u00b7s';
+        if (b >= GB) return (b / GB).toFixed(1) + 'G\u00b7s';
+        if (b >= MB) return (b / MB).toFixed(1) + 'M\u00b7s';
+        if (b >= KB) return (b / KB).toFixed(1) + 'K\u00b7s';
+        return b + 'B\u00b7s';
+    }
 
     function formatValue(type, v) {
         if (v === 0) return '-';
@@ -40,6 +57,11 @@
             case 'net':
             case 'disk-io-bytes':
                 return formatBytes(v);
+            case 'ram-usage-bsec':
+            case 'disk-usage-bsec':
+            case 'ram-request-bsec':
+            case 'disk-request-bsec':
+                return formatByteSeconds(v);
             case 'spending':
                 return '$' + (v / 100).toFixed(2);
             case 'disk-io-ops':
@@ -82,6 +104,11 @@
             case 'disk':
             case 'net':
             case 'disk-io-bytes':
+                return parseBytes(s);
+            case 'ram-usage-bsec':
+            case 'disk-usage-bsec':
+            case 'ram-request-bsec':
+            case 'disk-request-bsec':
                 return parseBytes(s);
             case 'disk-io-ops':
                 return parseInt(s, 10);

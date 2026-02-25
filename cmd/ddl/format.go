@@ -20,6 +20,9 @@ func parseValue(limitType, s string) (int64, error) {
 	case "ram", "disk", "net", "disk-io-bytes":
 		// Accept "512m", "1g", "100k" for bytes
 		return parseBytes(s)
+	case "ram-usage-bsec", "disk-usage-bsec", "ram-request-bsec", "disk-request-bsec":
+		// Same byte suffixes, unit is byte-seconds
+		return parseBytes(s)
 	case "disk-io-ops":
 		// Plain integer
 		return strconv.ParseInt(s, 10, 64)
@@ -110,6 +113,8 @@ func formatValue(limitType string, v int64) string {
 		return fmt.Sprintf("%ds", v)
 	case "ram", "disk", "net", "disk-io-bytes":
 		return formatBytesHuman(v)
+	case "ram-usage-bsec", "disk-usage-bsec", "ram-request-bsec", "disk-request-bsec":
+		return formatByteSeconds(v)
 	case "spending":
 		return fmt.Sprintf("$%.2f", float64(v)/100)
 	default:
@@ -138,6 +143,27 @@ func formatBytesHuman(b int64) string {
 	}
 }
 
+func formatByteSeconds(b int64) string {
+	const (
+		kb = 1024
+		mb = kb * 1024
+		gb = mb * 1024
+		tb = gb * 1024
+	)
+	switch {
+	case b >= tb:
+		return fmt.Sprintf("%.1fT·s", float64(b)/float64(tb))
+	case b >= gb:
+		return fmt.Sprintf("%.1fG·s", float64(b)/float64(gb))
+	case b >= mb:
+		return fmt.Sprintf("%.1fM·s", float64(b)/float64(mb))
+	case b >= kb:
+		return fmt.Sprintf("%.1fK·s", float64(b)/float64(kb))
+	default:
+		return fmt.Sprintf("%dB·s", b)
+	}
+}
+
 func getJSONFloat(m map[string]interface{}, key string) float64 {
 	if m == nil {
 		return 0
@@ -157,7 +183,8 @@ func getJSONFloat(m map[string]interface{}, key string) float64 {
 func printLimitsOrUsage(m map[string]interface{}, label string) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(w, "TYPE\t%s\n", strings.ToUpper(label))
-	types := []string{"cpu", "ram", "net", "disk", "disk-io-bytes", "disk-io-ops", "spending"}
+	types := []string{"cpu", "ram", "net", "disk", "disk-io-bytes", "disk-io-ops", "spending",
+		"ram-usage-bsec", "disk-usage-bsec", "ram-request-bsec", "disk-request-bsec"}
 	for _, t := range types {
 		v := int64(getJSONFloat(m, t))
 		fmt.Fprintf(w, "%s\t%s\n", t, formatValue(t, v))

@@ -181,6 +181,7 @@ type MockDocker struct {
 	Containers     map[string]*MockContainerState
 	ClonedFrom     []string // track clone calls
 	CloneIDCounter int
+	StoppedContainers []string // track StopContainer calls
 }
 
 type MockContainerState struct {
@@ -351,6 +352,18 @@ func (d *MockDocker) ContainerIP(ctx context.Context, id string) (string, error)
 		return "", fmt.Errorf("no IP address for container %s", id)
 	}
 	return state.IP, nil
+}
+
+func (d *MockDocker) StopContainer(ctx context.Context, id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	state, ok := d.Containers[id]
+	if !ok {
+		return fmt.Errorf("container %s not found", id)
+	}
+	state.Running = false
+	d.StoppedContainers = append(d.StoppedContainers, id)
+	return nil
 }
 
 func (d *MockDocker) SetContainerIP(id, ip string) {

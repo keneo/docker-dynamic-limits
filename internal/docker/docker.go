@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
@@ -25,6 +26,7 @@ type DockerClient interface {
 	DisconnectNetwork(ctx context.Context, id string) error
 	ReconnectNetwork(ctx context.Context, id string) error
 	ContainerIP(ctx context.Context, id string) (string, error)
+	StopContainer(ctx context.Context, id string) error
 }
 
 // Client wraps the Docker Engine API.
@@ -228,4 +230,10 @@ func (c *Client) ContainerIP(ctx context.Context, id string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no IP address for container %s", id)
+}
+
+// StopContainer stops a running container (SIGTERM then SIGKILL after timeout).
+func (c *Client) StopContainer(ctx context.Context, id string) error {
+	timeout := 10 * time.Second
+	return c.cli.ContainerStop(ctx, id, &timeout)
 }

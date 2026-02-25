@@ -16,6 +16,10 @@ Dynamic resource limit management for Docker containers. Set, monitor, and enfor
 | **Disk I/O bytes** | Cumulative bytes | cgroup `io.max` throttle |
 | **Disk I/O ops** | Cumulative operations | cgroup `io.max` throttle |
 | **Spending** | USD cents | HTTP proxy budget block |
+| **RAM usage B·s** | Byte-seconds (actual RAM × time) | Container kill |
+| **Disk usage B·s** | Byte-seconds (actual disk × time) | Container kill |
+| **RAM request B·s** | Byte-seconds (ddl RAM limit × time) | Container kill |
+| **Disk request B·s** | Byte-seconds (ddl disk limit × time) | Container kill |
 
 - **Per-container limits** — set, increase, or decrease any limit at any time
 - **Automatic enforcement** — daemon polls every second and applies/releases enforcement actions
@@ -107,6 +111,11 @@ ddl limits set <container> net 1g          # 1 GiB network transfer
 ddl limits set <container> disk-io-bytes 5g
 ddl limits set <container> disk-io-ops 1000000
 ddl limits set <container> spending 10.00  # $10.00 USD
+
+ddl limits set <container> ram-usage-bsec 100g    # 100 GB·s of RAM usage over time
+ddl limits set <container> disk-usage-bsec 500g   # 500 GB·s of disk usage over time
+ddl limits set <container> ram-request-bsec 1t    # 1 TB·s of RAM reservation over time
+ddl limits set <container> disk-request-bsec 1t   # 1 TB·s of disk reservation over time
 ```
 
 ### Adjust limits
@@ -217,6 +226,7 @@ Token usage is extracted from responses and costs are calculated using built-in 
 |---|---|
 | CPU time | `3600s`, `60m`, `1h` |
 | Bytes (RAM, disk, network, I/O) | `1024`, `512k`, `256m`, `1g`, `1.5t` |
+| Byte-seconds (usage/request B·s) | `100g`, `1.5t` (same byte suffixes, displayed as e.g. `1.5G·s`) |
 | I/O operations | Plain integer |
 | Spending | `10.00` (USD, stored as cents) |
 
