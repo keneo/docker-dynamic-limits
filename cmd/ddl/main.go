@@ -68,9 +68,13 @@ func main() {
 				return
 			}
 			// Socket not available locally (e.g. macOS Docker Desktop);
-			// fall back to docker exec if the daemon container is running.
-			if state, _ := inspectContainerState(daemonContainerName); state == "running" {
-				setupDockerExecClient()
+			// fall back to docker exec if the daemon container is running
+			// and the user hasn't explicitly set --api.
+			apiExplicit := cmd.Root().PersistentFlags().Changed("api")
+			if !apiExplicit {
+				if state, _ := inspectContainerState(daemonContainerName); state == "running" {
+					setupDockerExecClient()
+				}
 			}
 		},
 	}

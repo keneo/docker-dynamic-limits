@@ -82,45 +82,50 @@ func main() {
 	// Create API server
 	srv := api.NewServer(st, dc, em, px)
 
-	// Start read-only TCP server (for containers)
-	tcpServer := &http.Server{
-		Addr:    *addr,
-		Handler: srv.ReadOnlyHandler(),
-	}
-
-	go func() {
-		log.Printf("read-only TCP API listening on %s", *addr)
-		if err := tcpServer.ListenAndServe(); err != http.ErrServerClosed {
-			log.Fatalf("TCP server error: %v", err)
-		}
-	}()
-
-	// Start full API unix socket server (for host management)
+	// Try to start the unix socket server for full management API.
+	// If it fails (e.g. path not writable), fall back to full API on TCP.
 	var sockServer *http.Server
+	sockOK := false
 	if *sock != "" {
-		// Ensure socket directory exists
 		sockDir := filepath.Dir(*sock)
 		os.MkdirAll(sockDir, 0755)
-
-		// Remove stale socket file
 		os.Remove(*sock)
 
 		listener, err := net.Listen("unix", *sock)
 		if err != nil {
-			log.Fatalf("failed to listen on unix socket %s: %v", *sock, err)
+			log.Printf("warning: unix socket unavailable (%v), serving full API on TCP", err)
+		} else {
+			sockOK = true
+			sockServer = &http.Server{Handler: srv.Handler()}
+			go func() {
+				log.Printf("management API listening on unix:%s", *sock)
+				if err := sockServer.Serve(listener); err != http.ErrServerClosed {
+					log.Fatalf("unix socket server error: %v", err)
+				}
+			}()
 		}
-
-		sockServer = &http.Server{
-			Handler: srv.Handler(),
-		}
-
-		go func() {
-			log.Printf("management API listening on unix:%s", *sock)
-			if err := sockServer.Serve(listener); err != http.ErrServerClosed {
-				log.Fatalf("unix socket server error: %v", err)
-			}
-		}()
 	}
+
+	// Start TCP server.
+	// Read-only when the unix socket is active; full API otherwise.
+	var tcpHandler http.Handler
+	if sockOK {
+		tcpHandler = srv.ReadOnlyHandler()
+		log.Printf("read-only TCP API listening on %s", *addr)
+	} else {
+		tcpHandler = srv.Handler()
+		log.Printf("full TCP API listening on %s", *addr)
+	}
+	tcpServer := &http.Server{
+		Addr:    *addr,
+		Handler: tcpHandler,
+	}
+
+	go func() {
+		if err := tcpServer.ListenAndServe(); err != http.ErrServerClosed {
+			log.Fatalf("TCP server error: %v", err)
+		}
+	}()
 
 	// Wait for shutdown signal
 	sigCh := make(chan os.Signal, 1)
