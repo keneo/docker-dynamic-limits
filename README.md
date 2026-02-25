@@ -19,31 +19,39 @@ Dynamic resource limit management for Docker containers. Set, monitor, and enfor
 
 - **Per-container limits** — set, increase, or decrease any limit at any time
 - **Automatic enforcement** — daemon polls every second and applies/releases enforcement actions
-- **Spending tracking** — transparent HTTP proxy intercepts OpenAI and Anthropic API calls, extracts token usage from responses, and calculates costs using configurable model pricing
+- **Spending tracking** — transparent HTTP proxy intercepts OpenAI and Anthropic API calls, extracts token usage from responses, and calculates costs using built-in model pricing
 - **Container cloning** — clone a running container with all its limits copied over
-- **In-container self-query** — containers can check their own limits and usage via REST API
+- **In-container self-query** — containers can check their own limits and usage via REST API or `ddl-guest` binary
+- **Web dashboard** — real-time browser UI for monitoring and managing containers
 
 ## Architecture
 
 ```
-┌──────────┐         HTTP          ┌─────────────────────────────────────┐
-│  ddl CLI ├───────────────────────┤  ddld (daemon on :7123)             │
-└──────────┘                       │                                     │
-                                   │  ┌─────────┐  ┌──────────────────┐ │
-                                   │  │ REST API │  │ Enforcement Mgr  │ │
-                                   │  └────┬─────┘  └──┬───────────┬──┘ │
-                                   │       │           │           │     │
-                                   │  ┌────┴─────┐ ┌───┴────┐ ┌───┴───┐│
-                                   │  │  SQLite   │ │ Docker │ │ cgroup ││
-                                   │  │  Store    │ │ Client │ │ Reader ││
-                                   │  └──────────┘ └────────┘ └───────┘│
-                                   │                                     │
-                                   │  ┌──────────────────┐              │
-                                   │  │ Spending Proxy    │              │
-                                   │  │ (per-container)   │              │
-                                   │  └──────────────────┘              │
-                                   └─────────────────────────────────────┘
+                         ┌──────────────────────────────────────────┐
+                         │  ddld (daemon)                           │
+┌──────────┐  unix sock  │                                          │
+│  ddl CLI ├─────────────┤  Full API (unix socket /run/ddl/ddl.sock)│
+└──────────┘             │    register, limits, clone, delete, ...  │
+                         │                                          │
+┌──────────┐  TCP :7123  │  Read-only API (TCP)                     │
+│containers├─────────────┤    GET /containers, /usage, /limits      │
+└──────────┘  (by src IP)│    Container identified by source IP     │
+                         │                                          │
+┌──────────┐  TCP :7124  │  ┌──────────┐  ┌──────────────────┐     │
+│ dashboard├─────────────┤  │  SQLite   │  │ Enforcement Mgr  │     │
+└──────────┘             │  │  Store    │  └──┬───────────┬───┘     │
+                         │  └──────────┘  ┌───┴────┐ ┌────┴──┐     │
+                         │                │ Docker │ │ cgroup │     │
+                         │                │ Client │ │ Reader │     │
+                         │                └────────┘ └───────┘     │
+                         │  ┌──────────────────┐                    │
+                         │  │ Spending Proxy    │                    │
+                         │  │ (per-container)   │                    │
+                         │  └──────────────────┘                    │
+                         └──────────────────────────────────────────┘
 ```
+
+On macOS (Docker Desktop), the unix socket is not accessible from the host. The CLI automatically falls back to `docker exec` to reach the daemon's socket from inside the container.
 
 ## Quick start
 
@@ -54,14 +62,33 @@ go build ./cmd/ddld   # daemon
 go build ./cmd/ddl    # CLI
 ```
 
-### Run the daemon
+### Run the daemon (containerized)
+
+The recommended way to run ddld is as a Docker container:
 
 ```bash
-# Default: listens on :7123, stores data in /var/lib/ddl/ddl.db
+ddl daemon start          # build image (first time) and start container
+ddl daemon start --build  # force rebuild of the image
+ddl daemon status         # check if running
+ddl daemon stop           # stop and remove container
+```
+
+This starts ddld in a container named `ddl-daemon` with:
+- TCP API on port 7123 (read-only, for containers)
+- Unix socket at `/run/ddl/ddl.sock` (full API, for host management)
+- SQLite database on a persistent Docker volume
+
+### Run the daemon (directly)
+
+```bash
+# Default: TCP on :7123, socket at /run/ddl/ddl.sock
 sudo ddld
 
 # Custom options
-ddld -addr :8080 -db ./ddl.db -cgroup-base /sys/fs/cgroup
+ddld -addr :8080 -db ./ddl.db -sock /tmp/ddl.sock
+
+# No socket (full API on TCP, useful for development)
+ddld -addr :8080 -db ./ddl.db -sock ""
 ```
 
 ### Register a container
@@ -109,20 +136,51 @@ ddl clone <container> [new-name]
 ddl remove <container>
 ```
 
-## In-container self-query
+## Web dashboard
 
-Containers can query their own limits and usage from inside:
+A browser-based UI for real-time monitoring and management:
 
 ```bash
-# Using query parameter
-curl "http://<host>:7123/usage?id=<container_id>"
-curl "http://<host>:7123/limits?id=<container_id>"
+ddl dashboard             # start on :7124
+ddl dashboard --open      # start and open browser
+ddl dashboard stop        # stop the dashboard
+```
 
-# Using header
-curl -H "X-Container-ID: <container_id>" "http://<host>:7123/usage"
+The dashboard shows all containers with their limits, usage, and enforcement status. You can register, clone, remove containers and set limits directly from the UI. An offline banner appears when the daemon is unreachable.
+
+## In-container self-query
+
+Containers are automatically identified by their source IP address (refreshed every 5 seconds). No tokens or headers needed.
+
+### Using ddl-guest (recommended)
+
+The `ddl-guest` binary is included in the daemon container image and can be copied into managed containers:
+
+```bash
+# Copy ddl-guest into a running container
+docker cp ddl-daemon:/ddl-guest /tmp/ddl-guest
+docker cp /tmp/ddl-guest <container>:/usr/local/bin/ddl-guest
+
+# Inside the container
+ddl-guest          # formatted table output
+ddl-guest -json    # raw JSON
+```
+
+`ddl-guest` auto-discovers the daemon by trying `host.docker.internal:7123` and `172.17.0.1:7123`, or use `DDL_API_URL` to override.
+
+### Using curl
+
+```bash
+# From inside a container (identified by source IP)
+curl http://host.docker.internal:7123/usage
+curl http://host.docker.internal:7123/limits
 ```
 
 ## REST API
+
+The daemon exposes two interfaces:
+
+**Full API** (unix socket — for host management):
 
 | Method | Endpoint | Description |
 |---|---|---|
@@ -134,8 +192,16 @@ curl -H "X-Container-ID: <container_id>" "http://<host>:7123/usage"
 | `PUT` | `/containers/{id}/limits` | Set/increase/decrease a limit |
 | `GET` | `/containers/{id}/usage` | Get current usage |
 | `POST` | `/containers/{id}/clone` | Clone container with limits |
-| `GET` | `/usage?id=...` | In-container usage self-query |
-| `GET` | `/limits?id=...` | In-container limits self-query |
+| `GET` | `/usage` | In-container usage self-query |
+| `GET` | `/limits` | In-container limits self-query |
+
+**Read-only API** (TCP — for containers):
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/containers` | List all managed containers |
+| `GET` | `/usage` | Self-query usage + limits (by source IP) |
+| `GET` | `/limits` | Self-query limits (by source IP) |
 
 ## Spending tracking
 
@@ -143,7 +209,7 @@ The daemon runs a per-container HTTP forward proxy that intercepts API calls to:
 - `api.openai.com`
 - `api.anthropic.com`
 
-Token usage is extracted from responses and costs are calculated using built-in model pricing (configurable). When the spending budget is exceeded, further API requests are blocked with HTTP 429.
+Token usage is extracted from responses and costs are calculated using built-in model pricing. When the spending budget is exceeded, further API requests are blocked with HTTP 429.
 
 ## Value formats
 
@@ -156,17 +222,22 @@ Token usage is extracted from responses and costs are calculated using built-in 
 
 ## Requirements
 
-- Linux with cgroup v2
+- Linux with cgroup v2 (for enforcement; daemon runs in Docker)
 - Docker Engine
-- Go 1.18+
+- Go 1.21+
 
 ## Testing
 
 ```bash
-go test ./... -v
-```
+# Unit tests (80 tests across 8 packages)
+go test ./...
 
-89 tests across 8 packages covering the store (real SQLite `:memory:`), cgroup parsers, proxy spending logic, enforcement manager, REST API (httptest), and CLI formatting.
+# E2E: CLI + spending proxy
+bash e2e/cli_proxy_test.sh
+
+# E2E: Docker-in-Docker (full integration)
+docker build -t ddl-e2e -f e2e/Dockerfile . && docker run --privileged ddl-e2e
+```
 
 ## License
 
