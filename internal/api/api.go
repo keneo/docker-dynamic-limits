@@ -524,11 +524,26 @@ func (s *Server) buildStatus(c model.Container) model.ContainerStatus {
 	usage, _ := s.store.GetAllUsage(c.ID)
 	enforced := s.enforcement.GetEnforced(c.ID)
 
+	state := "deleted"
+	ctx := context.Background()
+	info, err := s.docker.InspectContainer(ctx, c.DockerID)
+	if err == nil {
+		switch {
+		case info.State.Paused:
+			state = "paused"
+		case info.State.Running:
+			state = "running"
+		default:
+			state = "exited"
+		}
+	}
+
 	return model.ContainerStatus{
 		Container: c,
 		Limits:    limits,
 		Usage:     usage,
 		Enforced:  enforced,
+		State:     state,
 	}
 }
 

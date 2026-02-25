@@ -168,9 +168,13 @@
             var tr = document.createElement('tr');
             if (enforcedCount > 0) tr.className = 'enforced-row';
 
+            var state = cs.state || 'unknown';
+            var stateClass = 'state-badge state-' + state;
+
             tr.innerHTML =
                 '<td><code>' + esc(c.id) + '</code></td>' +
                 '<td>' + esc(c.name || '-') + '</td>' +
+                '<td><span class="' + stateClass + '">' + esc(state) + '</span></td>' +
                 '<td>' + limitCount + '</td>' +
                 '<td>' + enforcedCount + (enforcedCount > 0 ? ' <span class="enforced-badge">ENFORCED</span>' : '') + '</td>' +
                 '<td class="actions"></td>';

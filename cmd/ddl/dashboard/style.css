@@ -199,6 +199,35 @@ tbody tr.enforced-row {
     margin-left: 4px;
 }
 
+.state-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.state-running {
+    background: var(--success);
+    color: white;
+}
+
+.state-paused {
+    background: var(--warning);
+    color: white;
+}
+
+.state-exited {
+    background: var(--text-muted);
+    color: white;
+}
+
+.state-deleted {
+    background: var(--danger);
+    color: white;
+}
+
 .actions {
     display: flex;
     gap: 6px;
