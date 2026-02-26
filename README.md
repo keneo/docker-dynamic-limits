@@ -212,13 +212,114 @@ The daemon exposes two interfaces:
 | `GET` | `/usage` | Self-query usage + limits (by source IP) |
 | `GET` | `/limits` | Self-query limits (by source IP) |
 
-## Spending tracking
+## Using LLMs with spending limits
 
-The daemon runs a per-container HTTP forward proxy that intercepts API calls to:
-- `api.openai.com`
-- `api.anthropic.com`
+The daemon includes a per-container HTTP proxy that tracks and enforces spending budgets on LLM API calls. Containers make plain HTTP requests through the proxy; the proxy upgrades them to HTTPS, injects the real API key, tracks token usage from responses, and blocks requests once the budget is exhausted.
 
-Token usage is extracted from responses and costs are calculated using built-in model pricing. When the spending budget is exceeded, further API requests are blocked with HTTP 429.
+### How it works
+
+```
+Container                    ddld Spending Proxy               LLM API
+   │                              │                              │
+   │  curl http://api.anthropic   │                              │
+   │  .com/v1/messages            │                              │
+   │  (no API key, plain HTTP)    │                              │
+   │─────────────────────────────>│                              │
+   │                              │  POST https://api.anthropic  │
+   │                              │  .com/v1/messages            │
+   │                              │  x-api-key: sk-ant-...       │
+   │                              │─────────────────────────────>│
+   │                              │                              │
+   │                              │  200 OK {usage: ...}         │
+   │                              │<─────────────────────────────│
+   │                              │                              │
+   │  200 OK {usage: ...}         │  (track tokens + cost)       │
+   │<─────────────────────────────│                              │
+```
+
+The proxy:
+1. Receives HTTP requests from the container
+2. Upgrades the connection to HTTPS for the real API
+3. Strips any auth headers the container sent and injects the daemon-configured API key
+4. Forwards the request and reads the response to extract token usage
+5. Calculates costs using built-in model pricing and accumulates spending
+6. Returns HTTP 429 `{"error":"spending budget exceeded"}` once the budget is hit
+
+This means containers never see the real API key and cannot bypass the spending limit.
+
+### Supported APIs
+
+| Provider | Host | Auth header | Models with built-in pricing |
+|---|---|---|---|
+| Anthropic | `api.anthropic.com` | `x-api-key` | claude-3-opus, claude-3-sonnet, claude-3-haiku, claude-haiku-4-5 |
+| OpenAI | `api.openai.com` | `Authorization: Bearer` | gpt-4, gpt-4-turbo, gpt-4o, gpt-4o-mini, gpt-3.5-turbo |
+
+Unknown models are charged at a conservative default rate. Custom pricing can be loaded via `LoadPrices()`.
+
+### Setup
+
+Pass API keys as environment variables when starting the daemon:
+
+```bash
+# Anthropic only
+DDL_ANTHROPIC_API_KEY=sk-ant-... ddl daemon start --build
+
+# OpenAI only
+DDL_OPENAI_API_KEY=sk-... ddl daemon start --build
+
+# Both
+DDL_ANTHROPIC_API_KEY=sk-ant-... DDL_OPENAI_API_KEY=sk-... ddl daemon start --build
+```
+
+The keys are forwarded into the daemon container automatically.
+
+### Using from a container
+
+After registering a container, the API returns a `proxy_addr` field. Configure the container to use this as its HTTP proxy:
+
+```bash
+# Register and get proxy address
+ddl register <container>
+# Response includes: "proxy_addr": "0.0.0.0:12345"
+
+# Set a spending budget
+ddl limits set <container> spending 1.00    # $1.00
+
+# From inside the container, use the proxy (no API key needed):
+export http_proxy=http://<daemon-ip>:<proxy-port>
+curl -X POST http://api.anthropic.com/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-haiku-4-5-20251001","max_tokens":100,"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+The container sends plain HTTP with no API key. The proxy handles HTTPS and authentication transparently.
+
+### Demo
+
+A self-contained demo script shows the full flow — start daemon with API key, create a container, make API calls through the proxy, and watch spending accumulate until the budget is hit with a 429:
+
+```bash
+# First run (builds Docker image + CLI):
+BUILD=1 ANTHROPIC_API_KEY=sk-ant-... bash examples/llm-budget-demo.sh
+
+# Subsequent runs (reuses Docker image, only rebuilds CLI):
+ANTHROPIC_API_KEY=sk-ant-... bash examples/llm-budget-demo.sh
+```
+
+Example output:
+```
+Request #1: HTTP 200 — model=claude-haiku-4-5-20251001  input=16  output=10
+         Spending: 1 / 5 cents
+Request #2: HTTP 200 — model=claude-haiku-4-5-20251001  input=16  output=10
+         Spending: 2 / 5 cents
+...
+Request #6: HTTP 429 — Budget exceeded!
+{"error":"spending budget exceeded"}
+```
+
+### Non-API traffic
+
+Requests to non-tracked hosts (anything other than `api.openai.com` and `api.anthropic.com`) pass through the proxy unmodified and are never blocked by the spending budget. Only LLM API calls count toward spending.
 
 ## Value formats
 

@@ -602,6 +602,13 @@ func (p *MockProxy) SetSpending(containerID string, cents int64) {
 	p.Spending[containerID] = cents
 }
 
+// GetProxyAddr returns the proxy address for a container.
+func (p *MockProxy) GetProxyAddr(containerID string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.Addrs[containerID]
+}
+
 // GetBudget returns the budget for a container.
 func (p *MockProxy) GetBudget(containerID string) int64 {
 	p.mu.Lock()

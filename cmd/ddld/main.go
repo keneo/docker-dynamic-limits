@@ -57,6 +57,20 @@ func main() {
 		st.SetUsage(containerID, model.LimitSpending, totalCents)
 	})
 
+	// Configure API keys for HTTP→HTTPS relay
+	apiKeys := make(map[string]string)
+	if key := os.Getenv("DDL_ANTHROPIC_API_KEY"); key != "" {
+		apiKeys["api.anthropic.com"] = key
+		log.Println("Anthropic API key configured for HTTP relay")
+	}
+	if key := os.Getenv("DDL_OPENAI_API_KEY"); key != "" {
+		apiKeys["api.openai.com"] = key
+		log.Println("OpenAI API key configured for HTTP relay")
+	}
+	if len(apiKeys) > 0 {
+		px.SetAPIKeys(apiKeys)
+	}
+
 	// Apply proxy resolve overrides (for testing with mock API servers)
 	// Format: DDL_PROXY_RESOLVE=api.openai.com=127.0.0.1,api.anthropic.com=127.0.0.1
 	if resolves := os.Getenv("DDL_PROXY_RESOLVE"); resolves != "" {

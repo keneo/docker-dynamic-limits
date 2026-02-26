@@ -146,8 +146,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	s.enforcement.StartContainer(c.ID, c.DockerID)
 
 	// Set up spending proxy if needed
+	var proxyAddr string
 	if s.proxy != nil {
-		proxyAddr, err := s.proxy.RegisterContainer(c.ID, 0, 0)
+		var err error
+		proxyAddr, err = s.proxy.RegisterContainer(c.ID, 0, 0)
 		if err != nil {
 			log.Printf("[api] warning: failed to start proxy for %s: %v", c.ID, err)
 		} else {
@@ -155,7 +157,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, c)
+	writeJSON(w, map[string]interface{}{
+		"id":          c.ID,
+		"docker_id":   c.DockerID,
+		"name":        c.Name,
+		"registered_at": c.RegisteredAt,
+		"proxy_addr":  proxyAddr,
+	})
 }
 
 func (s *Server) handleContainer(w http.ResponseWriter, r *http.Request) {
@@ -538,12 +546,18 @@ func (s *Server) buildStatus(c model.Container) model.ContainerStatus {
 		}
 	}
 
+	var proxyAddr string
+	if s.proxy != nil {
+		proxyAddr = s.proxy.GetProxyAddr(c.ID)
+	}
+
 	return model.ContainerStatus{
 		Container: c,
 		Limits:    limits,
 		Usage:     usage,
 		Enforced:  enforced,
 		State:     state,
+		ProxyAddr: proxyAddr,
 	}
 }
 

@@ -66,7 +66,7 @@ func daemonStartCmd() *cobra.Command {
 
 			// Run container
 			fmt.Println("Starting ddl-daemon...")
-			out, err := dockerOutput("run", "-d",
+			runArgs := []string{"run", "-d",
 				"--name", daemonContainerName,
 				"--pid=host",
 				"-v", "ddl-data:/data",
@@ -74,10 +74,20 @@ func daemonStartCmd() *cobra.Command {
 				"-v", "/var/run/docker.sock:/var/run/docker.sock",
 				"-v", "/var/run/ddl:/run/ddl",
 				"-p", fmt.Sprintf("%d:7123", port),
-				daemonImageName,
+			}
+
+			// Forward API key env vars to daemon container
+			for _, envVar := range []string{"DDL_ANTHROPIC_API_KEY", "DDL_OPENAI_API_KEY"} {
+				if val := os.Getenv(envVar); val != "" {
+					runArgs = append(runArgs, "-e", envVar+"="+val)
+				}
+			}
+
+			runArgs = append(runArgs, daemonImageName,
 				"-db", "/data/ddl.db",
 				"-sock", "/run/ddl/ddl.sock",
 			)
+			out, err := dockerOutput(runArgs...)
 			if err != nil {
 				return fmt.Errorf("docker run failed: %w", err)
 			}

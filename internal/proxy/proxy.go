@@ -18,6 +18,7 @@ type SpendingProxy interface {
 	UpdateBudget(containerID string, budget int64)
 	GetSpending(containerID string) int64
 	SetSpending(containerID string, cents int64)
+	GetProxyAddr(containerID string) string
 }
 
 // SpendingTracker tracks API spending per container via an HTTP forward proxy.
@@ -25,12 +26,16 @@ type SpendingTracker struct {
 	mu       sync.RWMutex
 	// containerByAddr maps proxy listener address (ip:port) to container ID
 	containerByAddr map[string]string
+	// proxyAddrs maps container ID to its proxy listener address
+	proxyAddrs map[string]string
 	// spending maps container ID to cumulative spending in cents
 	spending map[string]int64
 	// budgets maps container ID to budget limit in cents
 	budgets map[string]int64
 	// prices maps model name to price-per-token in micro-cents (1/1_000_000 of a cent)
 	prices map[string]ModelPricing
+	// apiKeys maps hostname (e.g. "api.anthropic.com") to API key
+	apiKeys map[string]string
 	// onSpendingUpdate is called when spending changes (to persist to store)
 	onSpendingUpdate func(containerID string, totalCents int64)
 	// transport is the HTTP transport used for outgoing requests (nil = http.DefaultTransport)
@@ -47,9 +52,11 @@ type ModelPricing struct {
 func NewSpendingTracker(onUpdate func(containerID string, totalCents int64)) *SpendingTracker {
 	return &SpendingTracker{
 		containerByAddr:  make(map[string]string),
+		proxyAddrs:       make(map[string]string),
 		spending:         make(map[string]int64),
 		budgets:          make(map[string]int64),
 		prices:           defaultPrices(),
+		apiKeys:          make(map[string]string),
 		onSpendingUpdate: onUpdate,
 	}
 }
@@ -68,6 +75,7 @@ func defaultPrices() map[string]ModelPricing {
 		"claude-3-opus":   {InputPerToken: 1500, OutputPerToken: 7500},  // $0.015/$0.075 per 1K
 		"claude-3-sonnet": {InputPerToken: 300, OutputPerToken: 1500},   // $0.003/$0.015 per 1K
 		"claude-3-haiku":  {InputPerToken: 25, OutputPerToken: 125},     // $0.00025/$0.00125 per 1K
+		"claude-haiku-4-5": {InputPerToken: 80, OutputPerToken: 400},   // $0.0008/$0.004 per 1K
 	}
 }
 
@@ -83,6 +91,7 @@ func (st *SpendingTracker) RegisterContainer(containerID string, budget int64, e
 
 	st.mu.Lock()
 	st.containerByAddr[addr] = containerID
+	st.proxyAddrs[containerID] = addr
 	st.spending[containerID] = existingSpending
 	st.budgets[containerID] = budget
 	st.mu.Unlock()
@@ -117,6 +126,23 @@ func (st *SpendingTracker) SetSpending(containerID string, cents int64) {
 	st.spending[containerID] = cents
 }
 
+// GetProxyAddr returns the proxy listener address for a container.
+func (st *SpendingTracker) GetProxyAddr(containerID string) string {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	return st.proxyAddrs[containerID]
+}
+
+// SetAPIKeys configures API keys for tracked hosts.
+// Keys map hostname (e.g. "api.anthropic.com") to the API key string.
+func (st *SpendingTracker) SetAPIKeys(keys map[string]string) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for k, v := range keys {
+		st.apiKeys[k] = v
+	}
+}
+
 func (st *SpendingTracker) proxyHandler(containerID string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Check if budget is exceeded before proxying
@@ -133,13 +159,50 @@ func (st *SpendingTracker) proxyHandler(containerID string) http.Handler {
 		}
 
 		// Forward the request
-		outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), r.Body)
+		// For tracked API hosts with configured keys, upgrade to HTTPS and inject auth
+		st.mu.RLock()
+		apiKey := ""
+		if isAPICall {
+			host := stripPort(r.Host)
+			apiKey = st.apiKeys[host]
+		}
+		st.mu.RUnlock()
+
+		var targetURL string
+		if isAPICall && apiKey != "" {
+			// Build HTTPS URL explicitly — relay HTTP→HTTPS
+			host := stripPort(r.Host)
+			targetURL = "https://" + host + r.URL.Path
+			if r.URL.RawQuery != "" {
+				targetURL += "?" + r.URL.RawQuery
+			}
+		} else {
+			targetURL = r.URL.String()
+		}
+
+		outReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 		outReq.Header = r.Header.Clone()
 		outReq.ContentLength = r.ContentLength
+
+		// When relaying with API keys, strip container-provided auth and inject ours
+		if isAPICall && apiKey != "" {
+			outReq.Header.Del("Authorization")
+			outReq.Header.Del("x-api-key")
+			host := stripPort(r.Host)
+			switch host {
+			case "api.anthropic.com":
+				outReq.Header.Set("x-api-key", apiKey)
+				if outReq.Header.Get("anthropic-version") == "" {
+					outReq.Header.Set("anthropic-version", "2023-06-01")
+				}
+			case "api.openai.com":
+				outReq.Header.Set("Authorization", "Bearer "+apiKey)
+			}
+		}
 
 		transport := st.transport
 		if transport == nil {
@@ -256,13 +319,21 @@ func CalculateSpendingCents(inputTokens, outputTokens int64, pricing ModelPricin
 	return costCents
 }
 
+// stripPort removes the port suffix from a host string (e.g. "api.openai.com:8080" -> "api.openai.com").
+func stripPort(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
+}
+
 func normalizeModelName(model string) string {
 	// Strip date suffixes and version details
 	model = strings.ToLower(model)
 	// Map known prefixes
 	prefixes := []string{
 		"gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo",
-		"claude-3-opus", "claude-3-sonnet", "claude-3-haiku",
+		"claude-haiku-4-5", "claude-3-opus", "claude-3-sonnet", "claude-3-haiku",
 	}
 	for _, p := range prefixes {
 		if strings.HasPrefix(model, p) {
