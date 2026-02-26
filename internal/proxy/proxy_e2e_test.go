@@ -137,7 +137,7 @@ func TestProxyE2E_BasicSpendingTracking(t *testing.T) {
 		t.Errorf("updateCount = %d, want 1", updateCount)
 	}
 
-	t.Logf("spending after 1 request: %d cents", spending)
+	t.Logf("spending after 1 request: %d milli-cents", spending)
 }
 
 func TestProxyE2E_CumulativeSpending(t *testing.T) {
@@ -191,7 +191,7 @@ func TestProxyE2E_CumulativeSpending(t *testing.T) {
 		t.Errorf("third (%d) should be > second (%d)", third, second)
 	}
 
-	t.Logf("spending progression: %d -> %d -> %d cents", first, second, third)
+	t.Logf("spending progression: %d -> %d -> %d milli-cents", first, second, third)
 }
 
 func TestProxyE2E_BudgetEnforcementBlocks(t *testing.T) {
@@ -204,8 +204,8 @@ func TestProxyE2E_BudgetEnforcementBlocks(t *testing.T) {
 	st := NewSpendingTracker(nil)
 	st.transport = localRedirectTransport("api.openai.com")
 
-	// Budget of 100 cents ($1.00)
-	proxyAddr, err := st.RegisterContainer("budget-c1", 100, 0)
+	// Budget of 100,000 milli-cents ($1.00)
+	proxyAddr, err := st.RegisterContainer("budget-c1", 100_000, 0)
 	if err != nil {
 		t.Fatalf("RegisterContainer: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestProxyE2E_BudgetEnforcementBlocks(t *testing.T) {
 	}
 
 	after1 := st.GetSpending("budget-c1")
-	t.Logf("after 1st: %d cents (budget: 100)", after1)
+	t.Logf("after 1st: %d milli-cents (budget: 100000)", after1)
 
 	// 2nd request: spending ~60 < 100 → allowed. After: ~120 cents
 	resp, err = client.Post(apiURL, "application/json", strings.NewReader(`{}`))
@@ -237,9 +237,9 @@ func TestProxyE2E_BudgetEnforcementBlocks(t *testing.T) {
 	}
 
 	after2 := st.GetSpending("budget-c1")
-	t.Logf("after 2nd: %d cents (budget: 100)", after2)
-	if after2 < 100 {
-		t.Fatalf("expected spending >= 100 to trigger block, got %d", after2)
+	t.Logf("after 2nd: %d milli-cents (budget: 100000)", after2)
+	if after2 < 100_000 {
+		t.Fatalf("expected spending >= 100000 milli-cents to trigger block, got %d", after2)
 	}
 
 	// 3rd request: spending >= 100 → BLOCKED
@@ -272,7 +272,7 @@ func TestProxyE2E_BudgetIncreaseUnblocks(t *testing.T) {
 	st := NewSpendingTracker(nil)
 	st.transport = localRedirectTransport("api.openai.com")
 
-	proxyAddr, err := st.RegisterContainer("unblock-c1", 50, 0) // very tight budget
+	proxyAddr, err := st.RegisterContainer("unblock-c1", 50_000, 0) // very tight budget (50,000 milli-cents = $0.50)
 	if err != nil {
 		t.Fatalf("RegisterContainer: %v", err)
 	}
@@ -297,8 +297,8 @@ func TestProxyE2E_BudgetIncreaseUnblocks(t *testing.T) {
 		t.Fatalf("expected 429, got %d", resp.StatusCode)
 	}
 
-	// Increase budget to 500
-	st.UpdateBudget("unblock-c1", 500)
+	// Increase budget to 500,000 milli-cents ($5.00)
+	st.UpdateBudget("unblock-c1", 500_000)
 
 	// Now request should succeed
 	resp, err = client.Post(apiURL, "application/json", strings.NewReader(`{}`))
@@ -360,7 +360,7 @@ func TestProxyE2E_NonTrackedHostIgnoresBudget(t *testing.T) {
 	st.transport = localRedirectTransport("example.com")
 
 	// Even with budget exceeded, non-tracked hosts should pass through
-	proxyAddr, err := st.RegisterContainer("nobudget-c1", 10, 100) // spending(100) > budget(10)
+	proxyAddr, err := st.RegisterContainer("nobudget-c1", 10_000, 100_000) // spending > budget
 	if err != nil {
 		t.Fatalf("RegisterContainer: %v", err)
 	}
@@ -412,12 +412,12 @@ func TestProxyE2E_AnthropicAPI(t *testing.T) {
 
 	// Verify pricing is correct:
 	// claude-3-opus: input 1500, output 7500 micro-cents/token
-	// 5000 * 1500 + 2000 * 7500 = 7.5M + 15M = 22.5M micro-cents = 22 cents
-	expected := int64((5000*1500 + 2000*7500) / 1_000_000)
+	// 5000 * 1500 + 2000 * 7500 = 7.5M + 15M = 22.5M micro-cents = 22,500 milli-cents
+	expected := int64((5000*1500 + 2000*7500) / 1_000)
 	if spending != expected {
 		t.Errorf("spending = %d, want %d (calculated from opus pricing)", spending, expected)
 	}
-	t.Logf("Anthropic spending: %d cents", spending)
+	t.Logf("Anthropic spending: %d milli-cents", spending)
 }
 
 func TestProxyE2E_ExistingSpendingPreloaded(t *testing.T) {
@@ -428,15 +428,15 @@ func TestProxyE2E_ExistingSpendingPreloaded(t *testing.T) {
 	st := NewSpendingTracker(nil)
 	st.transport = localRedirectTransport("api.openai.com")
 
-	// Register with 90 cents already spent, budget of 100
-	proxyAddr, err := st.RegisterContainer("preload-c1", 100, 90)
+	// Register with 90,000 milli-cents already spent, budget of 100,000 milli-cents ($1.00)
+	proxyAddr, err := st.RegisterContainer("preload-c1", 100_000, 90_000)
 	if err != nil {
 		t.Fatalf("RegisterContainer: %v", err)
 	}
 
 	initial := st.GetSpending("preload-c1")
-	if initial != 90 {
-		t.Fatalf("initial spending = %d, want 90", initial)
+	if initial != 90_000 {
+		t.Fatalf("initial spending = %d, want 90000", initial)
 	}
 
 	client := proxyClient(proxyAddr)
@@ -453,8 +453,8 @@ func TestProxyE2E_ExistingSpendingPreloaded(t *testing.T) {
 	}
 
 	afterFirst := st.GetSpending("preload-c1")
-	if afterFirst <= 90 {
-		t.Errorf("spending after request = %d, should be > 90", afterFirst)
+	if afterFirst <= 90_000 {
+		t.Errorf("spending after request = %d, should be > 90000", afterFirst)
 	}
 
 	// 2nd request: spending ~150 >= 100 → blocked
@@ -594,7 +594,7 @@ func TestProxyE2E_MultipleContainersIsolated(t *testing.T) {
 		t.Errorf("c2 spending = %d, want > 0", s2)
 	}
 
-	t.Logf("c1: %d cents (3 requests), c2: %d cents (1 request)", s1, s2)
+	t.Logf("c1: %d milli-cents (3 requests), c2: %d milli-cents (1 request)", s1, s2)
 }
 
 func TestProxyE2E_UpstreamError(t *testing.T) {

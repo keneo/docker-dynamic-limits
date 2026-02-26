@@ -63,7 +63,7 @@
             case 'disk-request-bsec':
                 return formatByteSeconds(v);
             case 'spending':
-                return '$' + (v / 100).toFixed(2);
+                return '$' + (v / 100000).toFixed(2);
             case 'disk-io-ops':
                 return v.toLocaleString();
             default:
@@ -113,7 +113,7 @@
             case 'disk-io-ops':
                 return parseInt(s, 10);
             case 'spending':
-                return Math.round(parseFloat(s) * 100);
+                return Math.round(parseFloat(s) * 100000);
             default:
                 return parseInt(s, 10);
         }

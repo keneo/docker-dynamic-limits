@@ -103,11 +103,11 @@ func TestSpendingTrackerGetSetSpending(t *testing.T) {
 func TestSpendingTrackerUpdateBudget(t *testing.T) {
 	st := NewSpendingTracker(nil)
 
-	st.budgets["c1"] = 100_000_000 // 100 cents in micro-cents
-	st.UpdateBudget("c1", 200)     // 200 cents
+	st.budgets["c1"] = 100_000 // 100 milli-cents in micro-cents
+	st.UpdateBudget("c1", 200) // 200 milli-cents
 
-	if st.budgets["c1"] != 200_000_000 {
-		t.Errorf("budget = %d, want 200_000_000 (200 cents in micro-cents)", st.budgets["c1"])
+	if st.budgets["c1"] != 200_000 {
+		t.Errorf("budget = %d, want 200_000 (200 milli-cents in micro-cents)", st.budgets["c1"])
 	}
 }
 

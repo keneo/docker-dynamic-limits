@@ -74,23 +74,23 @@ func TestParseBytes(t *testing.T) {
 	}
 }
 
-func TestParseCents(t *testing.T) {
+func TestParseMilliCents(t *testing.T) {
 	tests := []struct {
 		input   string
 		want    int64
 		wantErr bool
 	}{
-		{"10.00", 1000, false},
-		{"10", 1000, false},
-		{"0.01", 1, false},
-		{"0.50", 50, false},
-		{"100.99", 10099, false},
+		{"10.00", 1_000_000, false},
+		{"10", 1_000_000, false},
+		{"0.01", 1_000, false},
+		{"0.50", 50_000, false},
+		{"100.99", 10_099_000, false},
 		{"abc", 0, true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {
-			got, err := parseCents(tc.input)
+			got, err := parseMilliCents(tc.input)
 			if tc.wantErr {
 				if err == nil {
 					t.Error("expected error")
@@ -101,7 +101,7 @@ func TestParseCents(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if got != tc.want {
-				t.Errorf("parseCents(%q) = %d, want %d", tc.input, got, tc.want)
+				t.Errorf("parseMilliCents(%q) = %d, want %d", tc.input, got, tc.want)
 			}
 		})
 	}
@@ -121,7 +121,7 @@ func TestParseValue(t *testing.T) {
 		{"net", "100k", 100 * 1024, false},
 		{"disk-io-bytes", "1g", 1024 * 1024 * 1024, false},
 		{"disk-io-ops", "1000000", 1000000, false},
-		{"spending", "10.00", 1000, false},
+		{"spending", "10.00", 1_000_000, false},
 		{"unknown", "42", 42, false},
 	}
 
@@ -161,8 +161,8 @@ func TestFormatValue(t *testing.T) {
 		{"ram", 1073741824, "1.0G"},
 		{"ram", 1099511627776, "1.0T"},
 		{"spending", 0, "-"},
-		{"spending", 100, "$1.00"},
-		{"spending", 1050, "$10.50"},
+		{"spending", 100_000, "$1.00"},
+		{"spending", 1_050_000, "$10.50"},
 		{"disk-io-ops", 0, "-"},
 		{"disk-io-ops", 42, "42"},
 	}

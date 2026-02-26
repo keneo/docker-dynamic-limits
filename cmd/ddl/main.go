@@ -170,7 +170,7 @@ Limit types and value formats:
   net             Network transfer: 100m, 1g
   disk-io-bytes   I/O bytes: 1g, 5g
   disk-io-ops     I/O operations: 1000000
-  spending        USD budget: 10.00 (dollars), stored as cents
+  spending        USD budget: 10.00 (dollars), stored as milli-cents
   ram-usage-bsec      Cumulative RAM byte-seconds: 100g, 1t
   disk-usage-bsec     Cumulative disk byte-seconds: 500g, 1t
   ram-request-bsec    Cumulative RAM reservation byte-seconds: 1t

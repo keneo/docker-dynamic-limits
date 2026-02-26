@@ -137,14 +137,14 @@ proxy_curl() {
     CURL_BODY=$(echo "$full" | sed '$d')
 }
 
-# Helper: get spending cents from the API (JSON, precise).
-get_spending_cents() {
+# Helper: get spending milli-cents from the API (JSON, precise).
+get_spending() {
     curl -s "http://127.0.0.1:$API_PORT/containers/$1/usage" | jq -r '.spending // 0'
 }
 
 # ── Start mock LLM server ──────────────────────────────────────────────────
 # Returns gpt-4 pricing: 10 000 prompt + 5 000 completion tokens per call.
-# gpt-4: 3000 / 6000 micro-cents per token → 60 cents per call.
+# gpt-4: 3000 / 6000 micro-cents per token → 60,000 milli-cents per call.
 echo ""
 echo "${BOLD}Starting mock LLM API on port $MOCK_PORT...${RESET}"
 python3 - "$MOCK_PORT" <<'PYEOF' &
@@ -260,7 +260,7 @@ assert_contains "limits get shows spending" '$1.00' "$LIM_OUT"
 
 # ── 5. Proxy forwards request to mock API ──────────────────────────────────
 echo ""
-echo "${BOLD}Test: proxy forwards request (1st call, ~60 cents)${RESET}"
+echo "${BOLD}Test: proxy forwards request (1st call, ~60,000 milli-cents)${RESET}"
 proxy_curl
 assert_http   "1st request succeeds"       "200" "$CURL_STATUS"
 assert_contains "response body has model"  "gpt-4" "$CURL_BODY"
@@ -268,22 +268,22 @@ assert_contains "response body has model"  "gpt-4" "$CURL_BODY"
 # ── 6. Spending is tracked (visible via API + CLI) ─────────────────────────
 echo ""
 echo "${BOLD}Test: spending tracked after 1 request${RESET}"
-SPENDING=$(get_spending_cents "$SHORT_ID")
+SPENDING=$(get_spending "$SHORT_ID")
 assert_gt "spending > 0 via API" "$SPENDING" 0
-echo "  spending = $SPENDING cents"
+echo "  spending = $SPENDING milli-cents"
 
 USAGE_OUT=$(ddl usage "$SHORT_ID" 2>&1)
 assert_contains "ddl usage shows dollar amount" '$' "$USAGE_OUT"
 
 # ── 7. Second request still under budget ────────────────────────────────────
 echo ""
-echo "${BOLD}Test: 2nd request still under budget (~120 cents total)${RESET}"
+echo "${BOLD}Test: 2nd request still under budget (~120,000 milli-cents total)${RESET}"
 proxy_curl
 assert_http "2nd request succeeds" "200" "$CURL_STATUS"
 
-SPENDING=$(get_spending_cents "$SHORT_ID")
-assert_gt "spending > 60 after 2 calls" "$SPENDING" 60
-echo "  spending = $SPENDING cents"
+SPENDING=$(get_spending "$SHORT_ID")
+assert_gt "spending > 60000 after 2 calls" "$SPENDING" 60000
+echo "  spending = $SPENDING milli-cents"
 
 # ── 8. Budget exceeded → 429 ───────────────────────────────────────────────
 echo ""
@@ -293,7 +293,7 @@ assert_http     "3rd request returns 429"          "429" "$CURL_STATUS"
 assert_contains "body says budget exceeded"        "spending budget exceeded" "$CURL_BODY"
 
 # Spending must not increase (request was blocked before proxying)
-SPENDING_AFTER_BLOCK=$(get_spending_cents "$SHORT_ID")
+SPENDING_AFTER_BLOCK=$(get_spending "$SHORT_ID")
 assert_eq "spending unchanged after block" "$SPENDING" "$SPENDING_AFTER_BLOCK"
 
 # ── 9. Increase budget via CLI → unblocks ──────────────────────────────────
@@ -308,7 +308,7 @@ assert_http "request after increase succeeds" "200" "$CURL_STATUS"
 # ── 10. Decrease budget via CLI → re-blocks ─────────────────────────────────
 echo ""
 echo "${BOLD}Test: ddl limits set (low) re-blocks proxy${RESET}"
-ddl limits set "$SHORT_ID" spending 0.10 >/dev/null 2>&1   # 10 cents
+ddl limits set "$SHORT_ID" spending 0.10 >/dev/null 2>&1   # $0.10 = 10,000 milli-cents
 proxy_curl
 assert_http "request after tight budget is 429" "429" "$CURL_STATUS"
 

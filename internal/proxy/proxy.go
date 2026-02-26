@@ -92,8 +92,8 @@ func (st *SpendingTracker) RegisterContainer(containerID string, budget int64, e
 	st.mu.Lock()
 	st.containerByAddr[addr] = containerID
 	st.proxyAddrs[containerID] = addr
-	st.spending[containerID] = existingSpending * 1_000_000 // cents → micro-cents
-	st.budgets[containerID] = budget * 1_000_000            // cents → micro-cents
+	st.spending[containerID] = existingSpending * 1_000 // milli-cents → micro-cents
+	st.budgets[containerID] = budget * 1_000            // milli-cents → micro-cents
 	st.mu.Unlock()
 
 	proxy := &http.Server{
@@ -101,29 +101,29 @@ func (st *SpendingTracker) RegisterContainer(containerID string, budget int64, e
 	}
 	go proxy.Serve(listener)
 
-	log.Printf("[proxy] started proxy for container %s on %s (budget: %d cents)", containerID, addr, budget)
+	log.Printf("[proxy] started proxy for container %s on %s (budget: %d milli-cents)", containerID, addr, budget)
 	return addr, nil
 }
 
-// UpdateBudget changes the spending budget for a container (budget in cents).
+// UpdateBudget changes the spending budget for a container (budget in milli-cents).
 func (st *SpendingTracker) UpdateBudget(containerID string, budget int64) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.budgets[containerID] = budget * 1_000_000 // cents → micro-cents
+	st.budgets[containerID] = budget * 1_000 // milli-cents → micro-cents
 }
 
-// GetSpending returns current spending in cents for a container.
+// GetSpending returns current spending in milli-cents for a container.
 func (st *SpendingTracker) GetSpending(containerID string) int64 {
 	st.mu.RLock()
 	defer st.mu.RUnlock()
-	return st.spending[containerID] / 1_000_000 // micro-cents → cents
+	return st.spending[containerID] / 1_000 // micro-cents → milli-cents
 }
 
-// SetSpending sets the current spending for a container (cents, e.g., after loading from store).
-func (st *SpendingTracker) SetSpending(containerID string, cents int64) {
+// SetSpending sets the current spending for a container (milli-cents, e.g., after loading from store).
+func (st *SpendingTracker) SetSpending(containerID string, milliCents int64) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.spending[containerID] = cents * 1_000_000 // cents → micro-cents
+	st.spending[containerID] = milliCents * 1_000 // milli-cents → micro-cents
 }
 
 // GetProxyAddr returns the proxy listener address for a container.
@@ -302,11 +302,11 @@ func (st *SpendingTracker) trackSpending(containerID string, host string, body [
 	st.mu.Unlock()
 
 	if st.onSpendingUpdate != nil {
-		st.onSpendingUpdate(containerID, newTotal/1_000_000) // callback receives cents
+		st.onSpendingUpdate(containerID, newTotal/1_000) // callback receives milli-cents
 	}
 
-	log.Printf("[proxy] container %s: %d input + %d output tokens (%s) = %d micro-cents (total: %d micro-cents, %d cents)",
-		containerID, inputTokens, outputTokens, resp.Model, costMicroCents, newTotal, newTotal/1_000_000)
+	log.Printf("[proxy] container %s: %d input + %d output tokens (%s) = %d micro-cents (total: %d milli-cents)",
+		containerID, inputTokens, outputTokens, resp.Model, costMicroCents, newTotal/1_000)
 }
 
 // CalculateSpendingMicroCents calculates the cost in micro-cents from token counts and pricing.

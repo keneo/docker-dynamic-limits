@@ -27,8 +27,8 @@ func parseValue(limitType, s string) (int64, error) {
 		// Plain integer
 		return strconv.ParseInt(s, 10, 64)
 	case "spending":
-		// Accept "10.00" or "10" for USD, store as cents
-		return parseCents(s)
+		// Accept "10.00" or "10" for USD, store as milli-cents
+		return parseMilliCents(s)
 	default:
 		return strconv.ParseInt(s, 10, 64)
 	}
@@ -89,13 +89,13 @@ func parseBytes(s string) (int64, error) {
 	return n * multiplier, nil
 }
 
-func parseCents(s string) (int64, error) {
-	// Parse as float dollars, convert to cents
+func parseMilliCents(s string) (int64, error) {
+	// Parse as float dollars, convert to milli-cents (1 dollar = 100,000 milli-cents)
 	f, err := strconv.ParseFloat(s, 64)
 	if err != nil {
 		return 0, err
 	}
-	return int64(f * 100), nil
+	return int64(f * 100_000), nil
 }
 
 func formatValue(limitType string, v int64) string {
@@ -116,7 +116,7 @@ func formatValue(limitType string, v int64) string {
 	case "ram-usage-bsec", "disk-usage-bsec", "ram-request-bsec", "disk-request-bsec":
 		return formatByteSeconds(v)
 	case "spending":
-		return fmt.Sprintf("$%.2f", float64(v)/100)
+		return fmt.Sprintf("$%.2f", float64(v)/100_000)
 	default:
 		return fmt.Sprintf("%d", v)
 	}

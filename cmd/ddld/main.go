@@ -53,8 +53,8 @@ func main() {
 	cg := cgroup.NewReader(*cgroupBase)
 
 	// Initialize spending proxy
-	px := proxy.NewSpendingTracker(func(containerID string, totalCents int64) {
-		st.SetUsage(containerID, model.LimitSpending, totalCents)
+	px := proxy.NewSpendingTracker(func(containerID string, totalMilliCents int64) {
+		st.SetUsage(containerID, model.LimitSpending, totalMilliCents)
 	})
 
 	// Configure API keys for HTTP→HTTPS relay

@@ -11,13 +11,19 @@
 set -euo pipefail
 
 # --- Config ---
-BUDGET_CENTS=5  # $0.05 budget
+BUDGET_MCENTS=50  # 50 milli-cents = 0.05 cents = $0.0005 — tight enough to trigger with haiku
 CONTAINER_NAME="llm-budget-demo"
 DDL_PORT=7123
 
 # Helper: call the management API via unix socket inside the daemon container.
 ddl_api() {
   docker exec ddl-daemon curl -sf --unix-socket /run/ddl/ddl.sock "$@"
+}
+
+# Format milli-cents as dollars
+format_mcents() {
+  local mc=$1
+  python3 -c "print(f'\${$mc/100000:.4f}')"
 }
 
 # --- Preflight ---
@@ -37,7 +43,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "=== LLM Budget Demo ==="
-echo "Budget: \$0.$(printf '%02d' $BUDGET_CENTS) ($BUDGET_CENTS cents)"
+echo "Budget: $(format_mcents $BUDGET_MCENTS) ($BUDGET_MCENTS milli-cents)"
 echo ""
 
 # --- Step 1: Build CLI + daemon image, start daemon ---
@@ -108,10 +114,10 @@ echo "DDL ID: $DDL_ID   Proxy: $PROXY_ADDR"
 echo ""
 
 # --- Step 4: Set spending budget ---
-echo "--- Step 4: Setting spending budget to $BUDGET_CENTS cents ---"
+echo "--- Step 4: Setting spending budget to $(format_mcents $BUDGET_MCENTS) ($BUDGET_MCENTS milli-cents) ---"
 ddl_api -X PUT "http://localhost/containers/${DDL_ID}/limits" \
   -H "Content-Type: application/json" \
-  -d "{\"type\": \"spending\", \"value\": ${BUDGET_CENTS}, \"operation\": \"set\"}" | jq .
+  -d "{\"type\": \"spending\", \"value\": ${BUDGET_MCENTS}, \"operation\": \"set\"}" | jq .
 echo ""
 
 # --- Step 5: Make API calls through the proxy ---
@@ -120,10 +126,26 @@ echo "(Container sends plain HTTP to api.anthropic.com via proxy."
 echo " Proxy upgrades to HTTPS and injects the real API key.)"
 echo ""
 
-REQUEST_BODY='{"model":"claude-haiku-4-5-20251001","max_tokens":50,"messages":[{"role":"user","content":"Say hello in exactly 5 words."}]}'
+PROMPTS=(
+  "What is the tallest mountain on Earth? Answer in one sentence."
+  "Name three primary colors."
+  "Write a haiku about the ocean."
+  "What year did humans first land on the Moon? One sentence."
+  "Explain gravity to a 5-year-old in two sentences."
+  "What is the speed of light in km/s? One sentence."
+  "Name the four seasons."
+  "Who painted the Mona Lisa? One sentence."
+  "What is the chemical formula for water?"
+  "Say goodbye in three different languages."
+)
 
 for i in $(seq 1 10); do
-  echo -n "Request #$i: "
+  PROMPT="${PROMPTS[$((i-1))]}"
+  REQUEST_BODY=$(jq -n \
+    --arg prompt "$PROMPT" \
+    '{model:"claude-haiku-4-5-20251001",max_tokens:100,messages:[{role:"user",content:$prompt}]}')
+
+  echo "Request #$i: \"$PROMPT\""
 
   HTTP_CODE=$(docker exec "$CONTAINER_NAME" \
     curl -s -o /tmp/resp.json -w '%{http_code}' \
@@ -133,7 +155,7 @@ for i in $(seq 1 10); do
     --proxy "http://${PROXY_ADDR}" 2>/dev/null) || HTTP_CODE="000"
 
   if [[ "$HTTP_CODE" == "429" ]]; then
-    echo "HTTP 429 — Budget exceeded!"
+    echo "  => HTTP 429 — Budget exceeded!"
     docker exec "$CONTAINER_NAME" cat /tmp/resp.json 2>/dev/null || true
     echo ""
     break
@@ -142,9 +164,11 @@ for i in $(seq 1 10); do
     MODEL=$(echo "$RESPONSE" | jq -r '.model // "?"')
     INPUT_TOK=$(echo "$RESPONSE" | jq -r '.usage.input_tokens // 0')
     OUTPUT_TOK=$(echo "$RESPONSE" | jq -r '.usage.output_tokens // 0')
-    echo "HTTP 200 — model=$MODEL  input=$INPUT_TOK  output=$OUTPUT_TOK"
+    TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text // "(no text)"')
+    echo "  => $TEXT"
+    echo "     [model=$MODEL  tokens: $INPUT_TOK in / $OUTPUT_TOK out]"
   else
-    echo "HTTP $HTTP_CODE"
+    echo "  => HTTP $HTTP_CODE"
     docker exec "$CONTAINER_NAME" cat /tmp/resp.json 2>/dev/null || true
     echo ""
     # Show daemon logs on first failure for debugging
@@ -157,7 +181,7 @@ for i in $(seq 1 10); do
 
   # Show current spending
   SPENDING=$(ddl_api "http://localhost/containers/${DDL_ID}/usage" | jq -r '.spending // 0')
-  echo "         Spending: $SPENDING / $BUDGET_CENTS cents"
+  echo "     Spending: $(format_mcents $SPENDING) / $(format_mcents $BUDGET_MCENTS)  ($SPENDING / $BUDGET_MCENTS milli-cents)"
   echo ""
 
   sleep 1
