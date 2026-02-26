@@ -15,7 +15,7 @@ Dynamic resource limit management for Docker containers. Set, monitor, and enfor
 | **Network** | Cumulative bytes | Network disconnect |
 | **Disk I/O bytes** | Cumulative bytes | cgroup `io.max` throttle |
 | **Disk I/O ops** | Cumulative operations | cgroup `io.max` throttle |
-| **Spending** | USD cents | HTTP proxy budget block |
+| **Spending** | USD milli-cents | HTTP proxy budget block |
 | **RAM usage B·s** | Byte-seconds (actual RAM × time) | Container kill |
 | **Disk usage B·s** | Byte-seconds (actual disk × time) | Container kill |
 | **RAM request B·s** | Byte-seconds (ddl RAM limit × time) | Container kill |
@@ -331,12 +331,12 @@ ANTHROPIC_API_KEY=sk-ant-... bash examples/llm-budget-demo.sh
 
 Example output:
 ```
-Request #1: HTTP 200 — model=claude-haiku-4-5-20251001  input=16  output=10
-         Spending: 1 / 5 cents
-Request #2: HTTP 200 — model=claude-haiku-4-5-20251001  input=16  output=10
-         Spending: 2 / 5 cents
+Request #1: "What is the tallest mountain on Earth? Answer in one sentence."
+  => Mount Everest is the tallest mountain on Earth.
+     [model=claude-haiku-4-5-20251001  tokens: 16 in / 10 out]
+     Spending: $0.0001 / $0.0005  (13 / 50 milli-cents)
 ...
-Request #6: HTTP 429 — Budget exceeded!
+Request #4: HTTP 429 — Budget exceeded!
 {"error":"spending budget exceeded"}
 ```
 
@@ -352,7 +352,7 @@ Requests to non-tracked hosts (anything other than `api.openai.com` and `api.ant
 | Bytes (RAM, disk, network, I/O) | `1024`, `512k`, `256m`, `1g`, `1.5t` |
 | Byte-seconds (usage/request B·s) | `100g`, `1.5t` (same byte suffixes, displayed as e.g. `1.5G·s`) |
 | I/O operations | Plain integer |
-| Spending | `10.00` (USD, stored as cents) |
+| Spending | `10.00` (USD, stored as milli-cents) |
 
 ## Requirements
 

@@ -367,8 +367,9 @@ and number of currently enforced limits.`,
 
 func removeCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "remove <container>",
-		Short: "Stop managing a container",
+		Use:     "remove <container>",
+		Aliases: []string{"rm"},
+		Short:   "Stop managing a container",
 		Long: `Remove a container from ddld management.
 
 Stops tracking limits and usage for the container. The container
