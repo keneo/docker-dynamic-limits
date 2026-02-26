@@ -57,14 +57,37 @@ Dynamic resource limit management for Docker containers. Set, monitor, and enfor
 
 On macOS (Docker Desktop), the unix socket is not accessible from the host. The CLI automatically falls back to `docker exec` to reach the daemon's socket from inside the container.
 
-## Quick start
+## Installation
 
-### Build
+### Using `go install`
 
 ```bash
-go build ./cmd/ddld   # daemon
-go build ./cmd/ddl    # CLI
+go install github.com/keneo/docker-dynamic-limits/cmd/ddl@latest
+go install github.com/keneo/docker-dynamic-limits/cmd/ddld@latest
+go install github.com/keneo/docker-dynamic-limits/cmd/ddl-guest@latest
 ```
+
+### Using Make
+
+```bash
+git clone https://github.com/keneo/docker-dynamic-limits.git
+cd docker-dynamic-limits
+make install          # builds and installs to /usr/local/bin
+```
+
+To install to a different location:
+
+```bash
+make install PREFIX=~/.local/bin
+```
+
+### Build without installing
+
+```bash
+make build            # produces ./ddl, ./ddld, ./ddl-guest in the repo root
+```
+
+## Quick start
 
 ### Run the daemon (containerized)
 
