@@ -18,6 +18,21 @@ var defaultCandidates = []string{
 
 func main() {
 	jsonFlag := flag.Bool("json", false, "output raw JSON")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, `ddl-guest — query resource limits and usage from inside a container.
+
+Automatically discovers the ddld daemon by trying common Docker bridge
+addresses (host.docker.internal:7123, 172.17.0.1:7123). Override with
+the DDL_API_URL environment variable.
+
+Usage:
+  ddl-guest          formatted table output
+  ddl-guest -json    raw JSON output
+
+Flags:
+`)
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 
 	apiURL, err := resolveAPIURL(defaultCandidates)

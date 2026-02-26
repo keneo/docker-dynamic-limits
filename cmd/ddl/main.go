@@ -55,6 +55,24 @@ func main() {
 	root := &cobra.Command{
 		Use:   "ddl",
 		Short: "Docker Dynamic Limits - manage resource limits on Docker containers",
+		Long: `ddl manages dynamic resource limits on Docker containers.
+
+Set, monitor, and enforce cumulative limits on CPU time, RAM, disk,
+network, I/O, and LLM API spending per container — with automatic
+enforcement and in-container self-querying.
+
+Getting started:
+  ddl daemon start        Start the ddld daemon container
+  ddl register <id>       Register a Docker container
+  ddl limits set <c> cpu 1h   Set a 1-hour CPU limit
+  ddl usage <c>           Show usage vs limits
+  ddl ls                  List all managed containers
+
+Environment variables:
+  DDL_API_URL             Override the daemon API URL (default http://localhost:7123)
+  DDL_SOCK                Override the unix socket path
+  DDL_ANTHROPIC_API_KEY   Anthropic API key for spending proxy relay
+  DDL_OPENAI_API_KEY      OpenAI API key for spending proxy relay`,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			// Determine socket path: explicit flag/env > auto-detect > docker exec fallback > TCP
 			if sockPath != "" {
@@ -100,7 +118,18 @@ func registerCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "register <container_id>",
 		Short: "Start managing a container",
-		Args:  cobra.ExactArgs(1),
+		Long: `Register a Docker container for resource limit management.
+
+The container ID can be a full ID, short ID, or container name.
+Once registered, you can set limits, monitor usage, and enforce budgets.
+
+If the daemon has API keys configured, the response includes a proxy_addr
+field for routing LLM API calls through the spending proxy.
+
+Examples:
+  ddl register abc123def456
+  ddl register my-container`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			body := map[string]string{"container_id": args[0]}
 			resp, err := apiPost("/register", body)
@@ -120,12 +149,39 @@ func limitsCmd() *cobra.Command {
 	limits := &cobra.Command{
 		Use:   "limits",
 		Short: "Manage container limits",
+		Long: `Manage resource limits for a container.
+
+Subcommands:
+  set        Set a limit to an absolute value
+  increase   Increase a limit by a given amount
+  decrease   Decrease a limit by a given amount
+  get        Show all current limits`,
 	}
 
 	limits.AddCommand(&cobra.Command{
 		Use:   "set <container> <type> <value>",
-		Short: "Set a limit (cpu 3600s, ram 512m, net 1g, disk 10g, disk-io-bytes 5g, disk-io-ops 1000000, spending 10.00)",
-		Args:  cobra.ExactArgs(3),
+		Short: "Set a limit to an absolute value",
+		Long: `Set a resource limit to an absolute value.
+
+Limit types and value formats:
+  cpu             CPU time: 3600s, 60m, 1h
+  ram             Memory: 512m, 1g, 2g
+  disk            Disk space: 1g, 10g
+  net             Network transfer: 100m, 1g
+  disk-io-bytes   I/O bytes: 1g, 5g
+  disk-io-ops     I/O operations: 1000000
+  spending        USD budget: 10.00 (dollars), stored as cents
+  ram-usage-bsec      Cumulative RAM byte-seconds: 100g, 1t
+  disk-usage-bsec     Cumulative disk byte-seconds: 500g, 1t
+  ram-request-bsec    Cumulative RAM reservation byte-seconds: 1t
+  disk-request-bsec   Cumulative disk reservation byte-seconds: 1t
+
+Examples:
+  ddl limits set my-container cpu 1h
+  ddl limits set my-container ram 512m
+  ddl limits set my-container spending 5.00
+  ddl limits set my-container disk-io-bytes 5g`,
+		Args: cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return setLimit(args[0], args[1], args[2], "set")
 		},
@@ -134,7 +190,16 @@ func limitsCmd() *cobra.Command {
 	limits.AddCommand(&cobra.Command{
 		Use:   "increase <container> <type> <value>",
 		Short: "Increase a limit by the given amount",
-		Args:  cobra.ExactArgs(3),
+		Long: `Increase a resource limit by the given amount.
+
+Uses the same value formats as "limits set". The value is added
+to the current limit.
+
+Examples:
+  ddl limits increase my-container cpu 30m
+  ddl limits increase my-container ram 256m
+  ddl limits increase my-container spending 5.00`,
+		Args: cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return setLimit(args[0], args[1], args[2], "increase")
 		},
@@ -143,7 +208,15 @@ func limitsCmd() *cobra.Command {
 	limits.AddCommand(&cobra.Command{
 		Use:   "decrease <container> <type> <value>",
 		Short: "Decrease a limit by the given amount",
-		Args:  cobra.ExactArgs(3),
+		Long: `Decrease a resource limit by the given amount.
+
+Uses the same value formats as "limits set". The value is subtracted
+from the current limit.
+
+Examples:
+  ddl limits decrease my-container ram 128m
+  ddl limits decrease my-container spending 2.50`,
+		Args: cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return setLimit(args[0], args[1], args[2], "decrease")
 		},
@@ -152,7 +225,14 @@ func limitsCmd() *cobra.Command {
 	limits.AddCommand(&cobra.Command{
 		Use:   "get <container>",
 		Short: "Show all limits for a container",
-		Args:  cobra.ExactArgs(1),
+		Long: `Display all configured limits for a container.
+
+Shows a table of limit types and their current values.
+
+Examples:
+  ddl limits get my-container
+  ddl limits get abc123def456`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resp, err := apiGet(fmt.Sprintf("/containers/%s/limits", args[0]))
 			if err != nil {
@@ -170,7 +250,14 @@ func usageCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "usage <container>",
 		Short: "Show current usage for a container",
-		Args:  cobra.ExactArgs(1),
+		Long: `Show current resource usage for a container compared to its limits.
+
+Displays a table with usage, limit, and percentage for each resource type.
+Resources that have exceeded their limit are marked as ENFORCED.
+
+Examples:
+  ddl usage my-container`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Get both limits and usage for a combined view
 			usage, err := apiGet(fmt.Sprintf("/containers/%s/usage", args[0]))
@@ -206,7 +293,15 @@ func cloneCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "clone <container> [new-name]",
 		Short: "Clone a container with the same limits",
-		Args:  cobra.RangeArgs(1, 2),
+		Long: `Clone a Docker container, copying all its resource limits.
+
+Creates a new container from the same image with identical limit
+configuration. Optionally provide a name for the new container.
+
+Examples:
+  ddl clone my-container
+  ddl clone my-container my-container-2`,
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			body := map[string]string{}
 			if len(args) > 1 {
@@ -229,6 +324,10 @@ func lsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "ls",
 		Short: "List managed containers",
+		Long: `List all containers managed by ddld.
+
+Shows a table with container ID, name, number of configured limits,
+and number of currently enforced limits.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resp, err := httpClient.Get(apiURL + "/containers")
 			if err != nil {
@@ -270,7 +369,14 @@ func removeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "remove <container>",
 		Short: "Stop managing a container",
-		Args:  cobra.ExactArgs(1),
+		Long: `Remove a container from ddld management.
+
+Stops tracking limits and usage for the container. The container
+itself is not stopped or deleted.
+
+Examples:
+  ddl remove my-container`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			req, err := http.NewRequest(http.MethodDelete, apiURL+"/containers/"+args[0], nil)
 			if err != nil {

@@ -21,6 +21,16 @@ func daemonCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "daemon",
 		Short: "Manage the ddld daemon container",
+		Long: `Manage the ddld daemon container lifecycle.
+
+The daemon runs as a Docker container and provides the API for
+managing resource limits. It requires Docker socket access and
+cgroup filesystem for enforcement.
+
+Subcommands:
+  start    Build image (if needed) and start the daemon container
+  stop     Stop and remove the daemon container
+  status   Show whether the daemon is running and its uptime`,
 	}
 
 	cmd.AddCommand(daemonStartCmd())
@@ -37,6 +47,21 @@ func daemonStartCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Start the ddld daemon container",
+		Long: `Start the ddld daemon as a Docker container.
+
+Builds the Docker image on first run (or with --build). The daemon
+container mounts the Docker socket, cgroup filesystem, and a
+persistent volume for the SQLite database.
+
+API keys for the spending proxy can be passed via environment variables:
+  DDL_ANTHROPIC_API_KEY   Anthropic API key
+  DDL_OPENAI_API_KEY      OpenAI API key
+
+Examples:
+  ddl daemon start
+  ddl daemon start --build
+  ddl daemon start --port 8080
+  DDL_ANTHROPIC_API_KEY=sk-ant-... ddl daemon start --build`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Check if container already exists and is running
 			state, _ := inspectContainerState(daemonContainerName)
@@ -134,6 +159,7 @@ func daemonStopCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
 		Short: "Stop the ddld daemon container",
+		Long:  `Stop and remove the ddl-daemon container. Data is preserved on the ddl-data Docker volume.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			state, _ := inspectContainerState(daemonContainerName)
 			if state == "" {
@@ -161,6 +187,7 @@ func daemonStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "Show ddld daemon status",
+		Long:  `Show whether the ddl-daemon container is running and its uptime.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out, err := dockerOutput("inspect",
 				"--format", "{{.State.Status}} {{.State.StartedAt}} {{.Id}}",

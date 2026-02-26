@@ -33,6 +33,18 @@ func dashboardCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dashboard",
 		Short: "Start the web dashboard",
+		Long: `Start the web dashboard for real-time container monitoring.
+
+The dashboard shows all managed containers with their limits, usage,
+and enforcement status. You can register, clone, remove containers
+and set limits directly from the UI.
+
+An offline banner appears when the daemon is unreachable.
+
+Examples:
+  ddl dashboard              # start on :7124
+  ddl dashboard --open       # start and open browser
+  ddl dashboard --listen :8080`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDashboard(listen, open)
 		},
@@ -50,6 +62,7 @@ func dashboardStopCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
 		Short: "Stop the running dashboard",
+		Long:  `Stop a running dashboard process by sending it SIGTERM.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			data, err := os.ReadFile(dashboardPidFile)
 			if err != nil {
