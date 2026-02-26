@@ -21,7 +21,7 @@ type dockerExecTransport struct {
 func (t *dockerExecTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	args := []string{
 		"exec", t.containerName,
-		"curl", "-si", "--unix-socket", t.socketPath,
+		"curl", "-si", "--raw", "--unix-socket", t.socketPath,
 		"-X", req.Method,
 	}
 
