@@ -87,7 +87,8 @@ func mockPort(s *httptest.Server) int {
 }
 
 func TestProxyE2E_BasicSpendingTracking(t *testing.T) {
-	mock := mockOpenAIServer("gpt-4o", 1000, 500)
+	// Use gpt-4 with enough tokens to produce measurable cents (6 cents per call)
+	mock := mockOpenAIServer("gpt-4", 1000, 500)
 	defer mock.Close()
 	port := mockPort(mock)
 
@@ -140,7 +141,8 @@ func TestProxyE2E_BasicSpendingTracking(t *testing.T) {
 }
 
 func TestProxyE2E_CumulativeSpending(t *testing.T) {
-	mock := mockOpenAIServer("gpt-4o", 1000, 500)
+	// Use gpt-4 with enough tokens to produce measurable cents (6 cents per call)
+	mock := mockOpenAIServer("gpt-4", 1000, 500)
 	defer mock.Close()
 	port := mockPort(mock)
 

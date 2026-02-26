@@ -29,56 +29,56 @@ func TestIsTrackedAPIHost(t *testing.T) {
 	}
 }
 
-func TestCalculateSpendingCents(t *testing.T) {
+func TestCalculateSpendingMicroCents(t *testing.T) {
 	tests := []struct {
-		name         string
-		input        int64
-		output       int64
-		pricing      ModelPricing
-		wantCents    int64
+		name           string
+		input          int64
+		output         int64
+		pricing        ModelPricing
+		wantMicroCents int64
 	}{
 		{
-			name:      "zero tokens",
-			input:     0,
-			output:    0,
-			pricing:   ModelPricing{InputPerToken: 1000, OutputPerToken: 3000},
-			wantCents: 0,
+			name:           "zero tokens",
+			input:          0,
+			output:         0,
+			pricing:        ModelPricing{InputPerToken: 1000, OutputPerToken: 3000},
+			wantMicroCents: 0,
 		},
 		{
-			name:      "gpt-4 pricing exact",
-			input:     1000,
-			output:    1000,
-			pricing:   ModelPricing{InputPerToken: 3000, OutputPerToken: 6000},
-			wantCents: (1000*3000 + 1000*6000) / 1_000_000,
+			name:           "gpt-4 pricing exact",
+			input:          1000,
+			output:         1000,
+			pricing:        ModelPricing{InputPerToken: 3000, OutputPerToken: 6000},
+			wantMicroCents: 1000*3000 + 1000*6000,
 		},
 		{
-			name:      "minimum 1 cent",
-			input:     1,
-			output:    0,
-			pricing:   ModelPricing{InputPerToken: 100, OutputPerToken: 100},
-			wantCents: 1,
+			name:           "sub-cent cost preserved",
+			input:          1,
+			output:         0,
+			pricing:        ModelPricing{InputPerToken: 100, OutputPerToken: 100},
+			wantMicroCents: 100,
 		},
 		{
-			name:      "large token count",
-			input:     100000,
-			output:    50000,
-			pricing:   ModelPricing{InputPerToken: 1000, OutputPerToken: 3000},
-			wantCents: (100000*1000 + 50000*3000) / 1_000_000,
+			name:           "large token count",
+			input:          100000,
+			output:         50000,
+			pricing:        ModelPricing{InputPerToken: 1000, OutputPerToken: 3000},
+			wantMicroCents: 100000*1000 + 50000*3000,
 		},
 		{
-			name:      "output only",
-			input:     0,
-			output:    10000,
-			pricing:   ModelPricing{InputPerToken: 1000, OutputPerToken: 3000},
-			wantCents: (10000 * 3000) / 1_000_000,
+			name:           "output only",
+			input:          0,
+			output:         10000,
+			pricing:        ModelPricing{InputPerToken: 1000, OutputPerToken: 3000},
+			wantMicroCents: 10000 * 3000,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := CalculateSpendingCents(tc.input, tc.output, tc.pricing)
-			if got != tc.wantCents {
-				t.Errorf("got %d, want %d", got, tc.wantCents)
+			got := CalculateSpendingMicroCents(tc.input, tc.output, tc.pricing)
+			if got != tc.wantMicroCents {
+				t.Errorf("got %d, want %d", got, tc.wantMicroCents)
 			}
 		})
 	}
@@ -103,11 +103,11 @@ func TestSpendingTrackerGetSetSpending(t *testing.T) {
 func TestSpendingTrackerUpdateBudget(t *testing.T) {
 	st := NewSpendingTracker(nil)
 
-	st.budgets["c1"] = 100
-	st.UpdateBudget("c1", 200)
+	st.budgets["c1"] = 100_000_000 // 100 cents in micro-cents
+	st.UpdateBudget("c1", 200)     // 200 cents
 
-	if st.budgets["c1"] != 200 {
-		t.Errorf("budget = %d, want 200", st.budgets["c1"])
+	if st.budgets["c1"] != 200_000_000 {
+		t.Errorf("budget = %d, want 200_000_000 (200 cents in micro-cents)", st.budgets["c1"])
 	}
 }
 
@@ -124,12 +124,12 @@ func TestSpendingTrackerTrackSpending(t *testing.T) {
 
 	st.spending["c1"] = 0
 
-	// Simulate an API response body
+	// Simulate an API response body (gpt-4: 10000*3000 + 5000*6000 = 60M micro-cents = 60 cents)
 	body := []byte(`{
-		"model": "gpt-4o",
+		"model": "gpt-4",
 		"usage": {
-			"prompt_tokens": 1000,
-			"completion_tokens": 500
+			"prompt_tokens": 10000,
+			"completion_tokens": 5000
 		}
 	}`)
 
@@ -142,10 +142,10 @@ func TestSpendingTrackerTrackSpending(t *testing.T) {
 		t.Errorf("callback containerID = %q, want %q", callbackID, "c1")
 	}
 	if callbackTotal <= 0 {
-		t.Errorf("callback total = %d, want > 0", callbackTotal)
+		t.Errorf("callback total = %d cents, want > 0", callbackTotal)
 	}
-	if st.spending["c1"] != callbackTotal {
-		t.Errorf("spending[c1] = %d, want %d", st.spending["c1"], callbackTotal)
+	if st.GetSpending("c1") != callbackTotal {
+		t.Errorf("GetSpending(c1) = %d, callback total = %d, should match", st.GetSpending("c1"), callbackTotal)
 	}
 }
 
@@ -204,6 +204,7 @@ func TestSpendingTrackerAnthropicTokens(t *testing.T) {
 	st := NewSpendingTracker(nil)
 	st.spending["c1"] = 0
 
+	// claude-3-opus: 1000*1500 + 500*7500 = 5,250,000 micro-cents
 	body := []byte(`{
 		"model": "claude-3-opus-20240229",
 		"usage": {
@@ -214,15 +215,17 @@ func TestSpendingTrackerAnthropicTokens(t *testing.T) {
 
 	st.trackSpending("c1", "api.anthropic.com", body)
 
-	if st.spending["c1"] <= 0 {
-		t.Errorf("spending should be > 0 for Anthropic tokens, got %d", st.spending["c1"])
+	expected := int64(1000*1500 + 500*7500) // 5,250,000 micro-cents
+	if st.spending["c1"] != expected {
+		t.Errorf("spending = %d micro-cents, want %d", st.spending["c1"], expected)
 	}
 }
 
 func TestSpendingTrackerCumulativeSpending(t *testing.T) {
 	st := NewSpendingTracker(nil)
-	st.spending["c1"] = 50
+	st.spending["c1"] = 50_000_000 // 50 cents in micro-cents
 
+	// gpt-4: 10000*3000 + 5000*6000 = 60,000,000 micro-cents
 	body := []byte(`{
 		"model": "gpt-4",
 		"usage": {
@@ -233,7 +236,7 @@ func TestSpendingTrackerCumulativeSpending(t *testing.T) {
 
 	st.trackSpending("c1", "api.openai.com", body)
 
-	if st.spending["c1"] <= 50 {
-		t.Errorf("spending should accumulate, got %d", st.spending["c1"])
+	if st.spending["c1"] <= 50_000_000 {
+		t.Errorf("spending should accumulate, got %d micro-cents", st.spending["c1"])
 	}
 }

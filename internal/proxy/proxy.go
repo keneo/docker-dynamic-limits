@@ -28,9 +28,9 @@ type SpendingTracker struct {
 	containerByAddr map[string]string
 	// proxyAddrs maps container ID to its proxy listener address
 	proxyAddrs map[string]string
-	// spending maps container ID to cumulative spending in cents
+	// spending maps container ID to cumulative spending in micro-cents (1 cent = 1_000_000 micro-cents)
 	spending map[string]int64
-	// budgets maps container ID to budget limit in cents
+	// budgets maps container ID to budget limit in micro-cents (1 cent = 1_000_000 micro-cents)
 	budgets map[string]int64
 	// prices maps model name to price-per-token in micro-cents (1/1_000_000 of a cent)
 	prices map[string]ModelPricing
@@ -92,8 +92,8 @@ func (st *SpendingTracker) RegisterContainer(containerID string, budget int64, e
 	st.mu.Lock()
 	st.containerByAddr[addr] = containerID
 	st.proxyAddrs[containerID] = addr
-	st.spending[containerID] = existingSpending
-	st.budgets[containerID] = budget
+	st.spending[containerID] = existingSpending * 1_000_000 // cents → micro-cents
+	st.budgets[containerID] = budget * 1_000_000            // cents → micro-cents
 	st.mu.Unlock()
 
 	proxy := &http.Server{
@@ -105,25 +105,25 @@ func (st *SpendingTracker) RegisterContainer(containerID string, budget int64, e
 	return addr, nil
 }
 
-// UpdateBudget changes the spending budget for a container.
+// UpdateBudget changes the spending budget for a container (budget in cents).
 func (st *SpendingTracker) UpdateBudget(containerID string, budget int64) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.budgets[containerID] = budget
+	st.budgets[containerID] = budget * 1_000_000 // cents → micro-cents
 }
 
 // GetSpending returns current spending in cents for a container.
 func (st *SpendingTracker) GetSpending(containerID string) int64 {
 	st.mu.RLock()
 	defer st.mu.RUnlock()
-	return st.spending[containerID]
+	return st.spending[containerID] / 1_000_000 // micro-cents → cents
 }
 
-// SetSpending sets the current spending for a container (e.g., after loading from store).
+// SetSpending sets the current spending for a container (cents, e.g., after loading from store).
 func (st *SpendingTracker) SetSpending(containerID string, cents int64) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.spending[containerID] = cents
+	st.spending[containerID] = cents * 1_000_000 // cents → micro-cents
 }
 
 // GetProxyAddr returns the proxy listener address for a container.
@@ -294,29 +294,24 @@ func (st *SpendingTracker) trackSpending(containerID string, host string, body [
 		pricing = ModelPricing{InputPerToken: 1000, OutputPerToken: 3000}
 	}
 
-	costCents := CalculateSpendingCents(inputTokens, outputTokens, pricing)
+	costMicroCents := CalculateSpendingMicroCents(inputTokens, outputTokens, pricing)
 
 	st.mu.Lock()
-	st.spending[containerID] += costCents
+	st.spending[containerID] += costMicroCents
 	newTotal := st.spending[containerID]
 	st.mu.Unlock()
 
 	if st.onSpendingUpdate != nil {
-		st.onSpendingUpdate(containerID, newTotal)
+		st.onSpendingUpdate(containerID, newTotal/1_000_000) // callback receives cents
 	}
 
-	log.Printf("[proxy] container %s: %d input + %d output tokens (%s) = %d cents (total: %d)",
-		containerID, inputTokens, outputTokens, resp.Model, costCents, newTotal)
+	log.Printf("[proxy] container %s: %d input + %d output tokens (%s) = %d micro-cents (total: %d micro-cents, %d cents)",
+		containerID, inputTokens, outputTokens, resp.Model, costMicroCents, newTotal, newTotal/1_000_000)
 }
 
-// CalculateSpendingCents calculates the cost in cents from token counts and pricing.
-func CalculateSpendingCents(inputTokens, outputTokens int64, pricing ModelPricing) int64 {
-	costMicroCents := inputTokens*pricing.InputPerToken + outputTokens*pricing.OutputPerToken
-	costCents := costMicroCents / 1_000_000
-	if costCents == 0 && costMicroCents > 0 {
-		costCents = 1 // minimum 1 cent charge to avoid free-riding
-	}
-	return costCents
+// CalculateSpendingMicroCents calculates the cost in micro-cents from token counts and pricing.
+func CalculateSpendingMicroCents(inputTokens, outputTokens int64, pricing ModelPricing) int64 {
+	return inputTokens*pricing.InputPerToken + outputTokens*pricing.OutputPerToken
 }
 
 // stripPort removes the port suffix from a host string (e.g. "api.openai.com:8080" -> "api.openai.com").
