@@ -19,6 +19,7 @@ var (
 	apiURL     = "http://localhost:7123"
 	sockPath   string
 	httpClient = http.DefaultClient
+	jsonOutput bool
 )
 
 func init() {
@@ -66,7 +67,13 @@ Getting started:
   ddl register <id>       Register a Docker container
   ddl limits set <c> cpu 1h   Set a 1-hour CPU limit
   ddl usage <c>           Show usage vs limits
+  ddl usage-all           Show usage for all containers
   ddl ls                  List all managed containers
+
+All commands support --json for machine-readable output:
+  ddl ls --json
+  ddl usage <c> --json
+  ddl usage-all --json
 
 Environment variables:
   DDL_API_URL             Override the daemon API URL (default http://localhost:7123)
@@ -99,10 +106,12 @@ Environment variables:
 
 	root.PersistentFlags().StringVar(&apiURL, "api", apiURL, "ddld API URL")
 	root.PersistentFlags().StringVar(&sockPath, "sock", sockPath, "ddld unix socket path (overrides --api)")
+	root.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 
 	root.AddCommand(registerCmd())
 	root.AddCommand(limitsCmd())
 	root.AddCommand(usageCmd())
+	root.AddCommand(usageAllCmd())
 	root.AddCommand(cloneCmd())
 	root.AddCommand(lsCmd())
 	root.AddCommand(removeCmd())
@@ -112,6 +121,15 @@ Environment variables:
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+func printJSON(v interface{}) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(data))
+	return nil
 }
 
 func registerCmd() *cobra.Command {
@@ -135,6 +153,9 @@ Examples:
 			resp, err := apiPost("/register", body)
 			if err != nil {
 				return err
+			}
+			if jsonOutput {
+				return printJSON(resp)
 			}
 			fmt.Printf("Registered container: %s\n", resp["id"])
 			if name, ok := resp["name"]; ok {
@@ -238,6 +259,9 @@ Examples:
 			if err != nil {
 				return err
 			}
+			if jsonOutput {
+				return printJSON(resp)
+			}
 			printLimitsOrUsage(resp, "Limit")
 			return nil
 		},
@@ -265,6 +289,27 @@ Examples:
 				return err
 			}
 			limits, _ := apiGet(fmt.Sprintf("/containers/%s/limits", args[0]))
+
+			if jsonOutput {
+				types := []string{"cpu", "ram", "net", "disk", "disk-io-bytes", "disk-io-ops", "spending",
+					"ram-usage-bsec", "disk-usage-bsec", "ram-request-bsec", "disk-request-bsec"}
+				statusMap := map[string]interface{}{}
+				for _, t := range types {
+					u := getJSONFloat(usage, t)
+					l := getJSONFloat(limits, t)
+					entry := map[string]interface{}{"enforced": false}
+					if l > 0 {
+						entry["percentage"] = u / l * 100
+						entry["enforced"] = u >= l
+					}
+					statusMap[t] = entry
+				}
+				return printJSON(map[string]interface{}{
+					"usage":  usage,
+					"limits": limits,
+					"status": statusMap,
+				})
+			}
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 			fmt.Fprintf(w, "TYPE\tUSAGE\tLIMIT\tSTATUS\n")
@@ -311,6 +356,9 @@ Examples:
 			if err != nil {
 				return err
 			}
+			if jsonOutput {
+				return printJSON(resp)
+			}
 			fmt.Printf("Cloned container: %s\n", resp["id"])
 			if name, ok := resp["name"]; ok {
 				fmt.Printf("Name: %s\n", name)
@@ -329,15 +377,13 @@ func lsCmd() *cobra.Command {
 Shows a table with container ID, name, number of configured limits,
 and number of currently enforced limits.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := httpClient.Get(apiURL + "/containers")
+			containers, err := fetchContainers()
 			if err != nil {
-				return wrapConnErr(err)
-			}
-			defer resp.Body.Close()
-
-			var containers []map[string]interface{}
-			if err := json.NewDecoder(resp.Body).Decode(&containers); err != nil {
 				return err
+			}
+
+			if jsonOutput {
+				return printJSON(containers)
 			}
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -392,7 +438,70 @@ Examples:
 			if resp.StatusCode != http.StatusOK {
 				return readAPIError(resp)
 			}
+			if jsonOutput {
+				return printJSON(map[string]string{"status": "removed"})
+			}
 			fmt.Println("Container removed from management")
+			return nil
+		},
+	}
+}
+
+func usageAllCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "usage-all",
+		Short: "Show usage for all managed containers",
+		Long: `Show resource usage for all managed containers.
+
+Displays usage, limits, and status for every container in one output.
+Equivalent to running "ddl usage" for each container.
+
+Examples:
+  ddl usage-all
+  ddl usage-all --json`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			containers, err := fetchContainers()
+			if err != nil {
+				return err
+			}
+
+			if jsonOutput {
+				return printJSON(containers)
+			}
+
+			types := []string{"cpu", "ram", "net", "disk", "disk-io-bytes", "disk-io-ops", "spending",
+				"ram-usage-bsec", "disk-usage-bsec", "ram-request-bsec", "disk-request-bsec"}
+
+			for i, c := range containers {
+				ctr := c["container"].(map[string]interface{})
+				id := ctr["id"].(string)
+				name := ctr["name"].(string)
+
+				if i > 0 {
+					fmt.Println()
+				}
+				fmt.Printf("=== %s (%s) ===\n", name, id)
+
+				usage, _ := c["usage"].(map[string]interface{})
+				limits, _ := c["limits"].(map[string]interface{})
+
+				w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintf(w, "TYPE\tUSAGE\tLIMIT\tSTATUS\n")
+				for _, t := range types {
+					u := getJSONFloat(usage, t)
+					l := getJSONFloat(limits, t)
+					status := "-"
+					if l > 0 {
+						pct := u / l * 100
+						status = fmt.Sprintf("%.1f%%", pct)
+						if u >= l {
+							status += " ENFORCED"
+						}
+					}
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t, formatValue(t, int64(u)), formatValue(t, int64(l)), status)
+				}
+				w.Flush()
+			}
 			return nil
 		},
 	}
@@ -431,6 +540,10 @@ func setLimit(container, limitType, valueStr, operation string) error {
 
 	var result map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&result)
+
+	if jsonOutput {
+		return printJSON(result)
+	}
 
 	newVal := int64(result["value"].(float64))
 	verb := operation + "d"
@@ -485,6 +598,24 @@ func apiPostPath(path string, body interface{}) (map[string]interface{}, error) 
 		return nil, err
 	}
 	return result, nil
+}
+
+func fetchContainers() ([]map[string]interface{}, error) {
+	resp, err := httpClient.Get(apiURL + "/containers")
+	if err != nil {
+		return nil, wrapConnErr(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, readAPIError(resp)
+	}
+
+	var containers []map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&containers); err != nil {
+		return nil, err
+	}
+	return containers, nil
 }
 
 func readAPIError(resp *http.Response) error {

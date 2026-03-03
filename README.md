@@ -152,6 +152,7 @@ ddl limits decrease <container> ram 128m
 
 ```bash
 ddl usage <container>    # usage vs limits with percentages
+ddl usage-all            # usage for all containers at once
 ddl limits get <container>
 ddl ls                   # list all managed containers
 ```
@@ -166,6 +167,21 @@ ddl clone <container> [new-name]
 
 ```bash
 ddl remove <container>
+```
+
+### JSON output
+
+All commands support `--json` for machine-readable output:
+
+```bash
+ddl ls --json                    # array of container status objects
+ddl usage <container> --json     # {usage, limits, status} with percentages
+ddl usage-all --json             # full container array with usage/limits
+ddl limits get <container> --json
+ddl register <container> --json
+ddl clone <container> --json
+ddl remove <container> --json
+ddl limits set <c> cpu 1h --json
 ```
 
 ## Web dashboard
