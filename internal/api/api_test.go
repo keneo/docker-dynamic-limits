@@ -606,6 +606,9 @@ func TestWebSocketReceivesLimitChange(t *testing.T) {
 	}
 	defer conn.Close()
 
+	// Allow server handler goroutine to subscribe before publishing
+	time.Sleep(50 * time.Millisecond)
+
 	// Publish a limit_change event
 	bus.PublishData(events.LimitChange, containerID, events.LimitChangeData{
 		LimitType: "cpu",
@@ -660,6 +663,9 @@ func TestWebSocketFilterByContainerID(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
+
+	// Allow server handler goroutine to subscribe before publishing
+	time.Sleep(50 * time.Millisecond)
 
 	bus.PublishData(events.LimitChange, "c1", events.LimitChangeData{LimitType: "cpu"})
 	bus.PublishData(events.LimitChange, "c2", events.LimitChangeData{LimitType: "ram"})
