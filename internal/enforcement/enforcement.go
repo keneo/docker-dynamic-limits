@@ -10,6 +10,7 @@ import (
 
 	"github.com/keneo/docker-dynamic-limits/internal/cgroup"
 	"github.com/keneo/docker-dynamic-limits/internal/docker"
+	"github.com/keneo/docker-dynamic-limits/internal/events"
 	"github.com/keneo/docker-dynamic-limits/internal/model"
 	"github.com/keneo/docker-dynamic-limits/internal/proxy"
 	"github.com/keneo/docker-dynamic-limits/internal/store"
@@ -30,6 +31,7 @@ type Manager struct {
 	docker   docker.DockerClient
 	cgroup   cgroup.CgroupReader
 	proxy    proxy.SpendingProxy
+	bus      *events.Bus
 	interval time.Duration
 
 	mu        sync.Mutex
@@ -38,12 +40,13 @@ type Manager struct {
 }
 
 // NewManager creates an enforcement manager.
-func NewManager(st store.DataStore, dc docker.DockerClient, cg cgroup.CgroupReader, px proxy.SpendingProxy) *Manager {
+func NewManager(st store.DataStore, dc docker.DockerClient, cg cgroup.CgroupReader, px proxy.SpendingProxy, bus *events.Bus) *Manager {
 	return &Manager{
 		store:    st,
 		docker:   dc,
 		cgroup:   cg,
 		proxy:    px,
+		bus:      bus,
 		interval: time.Second,
 		workers:  make(map[string]context.CancelFunc),
 		enforced: make(map[string]map[model.LimitType]bool),
@@ -184,6 +187,29 @@ func (m *Manager) checkAndEnforce(ctx context.Context, containerID, dockerID str
 				m.release(ctx, containerID, dockerID, lt, cgroupPath)
 			}
 		}
+	}
+
+	// Emit usage_update event
+	if m.bus != nil {
+		allUsage, _ := m.store.GetAllUsage(containerID)
+		enforcedMap := m.GetEnforced(containerID)
+		uMap := make(map[string]int64, len(allUsage))
+		for k, v := range allUsage {
+			uMap[string(k)] = v
+		}
+		lMap := make(map[string]int64, len(limits))
+		for k, v := range limits {
+			lMap[string(k)] = v
+		}
+		eMap := make(map[string]bool, len(enforcedMap))
+		for k, v := range enforcedMap {
+			eMap[string(k)] = v
+		}
+		m.bus.PublishData(events.UsageUpdate, containerID, events.UsageUpdateData{
+			Usage:    uMap,
+			Limits:   lMap,
+			Enforced: eMap,
+		})
 	}
 }
 
@@ -351,6 +377,13 @@ func (m *Manager) enforce(ctx context.Context, containerID, dockerID string, lt 
 	}
 	m.enforced[containerID][lt] = true
 	m.mu.Unlock()
+
+	if m.bus != nil {
+		m.bus.PublishData(events.EnforcementChange, containerID, events.EnforcementChangeData{
+			LimitType: string(lt),
+			Enforced:  true,
+		})
+	}
 }
 
 func (m *Manager) release(ctx context.Context, containerID, dockerID string, lt model.LimitType, cgroupPath string) {
@@ -418,6 +451,13 @@ func (m *Manager) release(ctx context.Context, containerID, dockerID string, lt 
 		m.enforced[containerID][lt] = false
 	}
 	m.mu.Unlock()
+
+	if m.bus != nil {
+		m.bus.PublishData(events.EnforcementChange, containerID, events.EnforcementChangeData{
+			LimitType: string(lt),
+			Enforced:  false,
+		})
+	}
 }
 
 // isActuallyEnforced checks the real container state to detect enforcement

@@ -13,6 +13,7 @@ import (
 
 	"github.com/keneo/docker-dynamic-limits/internal/docker"
 	"github.com/keneo/docker-dynamic-limits/internal/enforcement"
+	"github.com/keneo/docker-dynamic-limits/internal/events"
 	"github.com/keneo/docker-dynamic-limits/internal/model"
 	"github.com/keneo/docker-dynamic-limits/internal/proxy"
 	"github.com/keneo/docker-dynamic-limits/internal/store"
@@ -24,6 +25,7 @@ type Server struct {
 	docker      docker.DockerClient
 	enforcement enforcement.EnforcementController
 	proxy       proxy.SpendingProxy
+	bus         *events.Bus
 	mux         *http.ServeMux
 
 	ipMu  sync.RWMutex
@@ -32,12 +34,13 @@ type Server struct {
 }
 
 // NewServer creates a new API server.
-func NewServer(st store.DataStore, dc docker.DockerClient, em enforcement.EnforcementController, px proxy.SpendingProxy) *Server {
+func NewServer(st store.DataStore, dc docker.DockerClient, em enforcement.EnforcementController, px proxy.SpendingProxy, bus *events.Bus) *Server {
 	s := &Server{
 		store:       st,
 		docker:      dc,
 		enforcement: em,
 		proxy:       px,
+		bus:         bus,
 		mux:         http.NewServeMux(),
 		ipMap:       make(map[string]string),
 		done:        make(chan struct{}),
@@ -57,6 +60,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/containers", s.handleContainers)
 	s.mux.HandleFunc("/containers/", s.handleContainer)
 	s.mux.HandleFunc("/register", s.handleRegister)
+	s.mux.HandleFunc("/events", s.handleEvents)
 	// In-container query endpoints (container identifies itself by source IP or token)
 	s.mux.HandleFunc("/usage", s.handleSelfUsage)
 	s.mux.HandleFunc("/limits", s.handleSelfLimits)
@@ -73,6 +77,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) ReadOnlyHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/containers", s.handleContainersReadOnly)
+	mux.HandleFunc("/events", s.handleEvents)
 	mux.HandleFunc("/usage", s.handleSelfUsageByIP)
 	mux.HandleFunc("/limits", s.handleSelfLimitsByIP)
 	return mux
@@ -145,6 +150,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Start enforcement
 	s.enforcement.StartContainer(c.ID, c.DockerID)
 
+	if s.bus != nil {
+		s.bus.PublishData(events.ContainerRegister, c.ID, events.ContainerRegisterData{
+			DockerID: c.DockerID,
+			Name:     name,
+		})
+	}
+
 	// Set up spending proxy if needed
 	var proxyAddr string
 	if s.proxy != nil {
@@ -207,6 +219,9 @@ func (s *Server) handleContainerInfo(w http.ResponseWriter, r *http.Request, con
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		if s.bus != nil {
+			s.bus.PublishData(events.ContainerRemove, containerID, events.ContainerRemoveData{})
+		}
 		writeJSON(w, map[string]string{"status": "removed"})
 		return
 	}
@@ -242,17 +257,16 @@ func (s *Server) handleLimits(w http.ResponseWriter, r *http.Request, containerI
 		}
 
 		lt := model.LimitType(req.Type)
+		oldValue, _ := s.store.GetLimit(containerID, lt)
 		var newValue int64
 
 		switch req.Operation {
 		case "set", "":
 			newValue = req.Value
 		case "increase":
-			current, _ := s.store.GetLimit(containerID, lt)
-			newValue = current + req.Value
+			newValue = oldValue + req.Value
 		case "decrease":
-			current, _ := s.store.GetLimit(containerID, lt)
-			newValue = current - req.Value
+			newValue = oldValue - req.Value
 			if newValue < 0 {
 				newValue = 0
 			}
@@ -281,6 +295,19 @@ func (s *Server) handleLimits(w http.ResponseWriter, r *http.Request, containerI
 		}
 
 		s.enforcement.NotifyLimitChanged(containerID)
+
+		if s.bus != nil {
+			op := req.Operation
+			if op == "" {
+				op = "set"
+			}
+			s.bus.PublishData(events.LimitChange, containerID, events.LimitChangeData{
+				LimitType: req.Type,
+				OldValue:  oldValue,
+				NewValue:  newValue,
+				Operation: op,
+			})
+		}
 
 		writeJSON(w, map[string]interface{}{
 			"type":  req.Type,
@@ -352,6 +379,13 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request, containerID
 
 	// Start enforcement for the clone
 	s.enforcement.StartContainer(newContainer.ID, newContainer.DockerID)
+
+	if s.bus != nil {
+		s.bus.PublishData(events.ContainerRegister, newContainer.ID, events.ContainerRegisterData{
+			DockerID: newContainer.DockerID,
+			Name:     name,
+		})
+	}
 
 	writeJSON(w, newContainer)
 }

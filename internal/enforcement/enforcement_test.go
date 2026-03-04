@@ -4,22 +4,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/keneo/docker-dynamic-limits/internal/events"
 	"github.com/keneo/docker-dynamic-limits/internal/model"
 	"github.com/keneo/docker-dynamic-limits/internal/testutil"
 )
 
-func newTestManager() (*Manager, *testutil.MockStore, *testutil.MockDocker, *testutil.MockCgroup, *testutil.MockProxy) {
+func newTestManager() (*Manager, *testutil.MockStore, *testutil.MockDocker, *testutil.MockCgroup, *testutil.MockProxy, *events.Bus) {
 	ms := testutil.NewMockStore()
 	md := testutil.NewMockDocker()
 	mc := testutil.NewMockCgroup()
 	mp := testutil.NewMockProxy()
-	m := NewManager(ms, md, mc, mp)
+	bus := events.NewBus()
+	m := NewManager(ms, md, mc, mp, bus)
 	m.interval = 50 * time.Millisecond // faster for tests
-	return m, ms, md, mc, mp
+	return m, ms, md, mc, mp, bus
 }
 
 func TestStartStopContainer(t *testing.T) {
-	m, _, _, _, _ := newTestManager()
+	m, _, _, _, _, _ := newTestManager()
 
 	m.StartContainer("c1", "dockerid1")
 
@@ -41,7 +43,7 @@ func TestStartStopContainer(t *testing.T) {
 }
 
 func TestStartContainerIdempotent(t *testing.T) {
-	m, _, _, _, _ := newTestManager()
+	m, _, _, _, _, _ := newTestManager()
 
 	m.StartContainer("c1", "dockerid1")
 	m.StartContainer("c1", "dockerid1") // should not panic or create duplicate
@@ -57,20 +59,20 @@ func TestStartContainerIdempotent(t *testing.T) {
 }
 
 func TestStopContainerNonexistent(t *testing.T) {
-	m, _, _, _, _ := newTestManager()
+	m, _, _, _, _, _ := newTestManager()
 	// Should not panic
 	m.StopContainer("nonexistent")
 }
 
 func TestIsEnforcedDefault(t *testing.T) {
-	m, _, _, _, _ := newTestManager()
+	m, _, _, _, _, _ := newTestManager()
 	if m.IsEnforced("c1", model.LimitCPU) {
 		t.Error("should not be enforced by default")
 	}
 }
 
 func TestGetEnforcedEmpty(t *testing.T) {
-	m, _, _, _, _ := newTestManager()
+	m, _, _, _, _, _ := newTestManager()
 	enforced := m.GetEnforced("c1")
 	if len(enforced) != 0 {
 		t.Errorf("expected empty map, got %v", enforced)
@@ -78,13 +80,13 @@ func TestGetEnforcedEmpty(t *testing.T) {
 }
 
 func TestNotifyLimitChanged(t *testing.T) {
-	m, _, _, _, _ := newTestManager()
+	m, _, _, _, _, _ := newTestManager()
 	// Should not panic
 	m.NotifyLimitChanged("c1")
 }
 
 func TestEnforcementCPUPause(t *testing.T) {
-	m, ms, md, mc, _ := newTestManager()
+	m, ms, md, mc, _, _ := newTestManager()
 
 	dockerID := "abcdef123456789000"
 	containerID := dockerID[:12]
@@ -110,7 +112,7 @@ func TestEnforcementCPUPause(t *testing.T) {
 }
 
 func TestEnforcementNoLimitNoAction(t *testing.T) {
-	m, ms, md, mc, _ := newTestManager()
+	m, ms, md, mc, _, _ := newTestManager()
 
 	dockerID := "abcdef123456789000"
 	containerID := dockerID[:12]
@@ -134,7 +136,7 @@ func TestEnforcementNoLimitNoAction(t *testing.T) {
 }
 
 func TestEnforcementUsageBelowLimit(t *testing.T) {
-	m, ms, md, mc, _ := newTestManager()
+	m, ms, md, mc, _, _ := newTestManager()
 
 	dockerID := "abcdef123456789000"
 	containerID := dockerID[:12]
@@ -158,7 +160,7 @@ func TestEnforcementUsageBelowLimit(t *testing.T) {
 }
 
 func TestStartAllStopAll(t *testing.T) {
-	m, ms, md, _, _ := newTestManager()
+	m, ms, md, _, _, _ := newTestManager()
 
 	md.AddContainer("aaaaaaaaaaaa000000", "c1", true)
 	md.AddContainer("bbbbbbbbbbbb000000", "c2", true)
@@ -191,7 +193,7 @@ func TestEnforcementAlreadyPaused(t *testing.T) {
 	// Bug fix: when a container is already paused (e.g. from a previous daemon),
 	// enforce() should treat "already paused" as success and set the enforced flag.
 	// This ensures that if the limit is later increased, release() will fire.
-	m, ms, md, mc, _ := newTestManager()
+	m, ms, md, mc, _, _ := newTestManager()
 
 	dockerID := "abcdef123456789000"
 	containerID := dockerID[:12]
@@ -232,7 +234,7 @@ func TestEnforcementReconcileAfterRestart(t *testing.T) {
 	// If the container is paused but usage is now below the limit (e.g. limit
 	// was increased), the enforcement loop should detect the paused state and
 	// release the container.
-	m, ms, md, mc, _ := newTestManager()
+	m, ms, md, mc, _, _ := newTestManager()
 
 	dockerID := "abcdef123456789000"
 	containerID := dockerID[:12]
@@ -261,7 +263,7 @@ func TestEnforcementReconcileAfterRestart(t *testing.T) {
 }
 
 func TestIsOtherPauseActive(t *testing.T) {
-	m, _, _, _, _ := newTestManager()
+	m, _, _, _, _, _ := newTestManager()
 
 	m.enforced["c1"] = map[model.LimitType]bool{
 		model.LimitCPU:  true,
@@ -276,5 +278,71 @@ func TestIsOtherPauseActive(t *testing.T) {
 	// CPU is enforced, checking from CPU's perspective (should not count itself)
 	if m.isOtherPauseActive("c1", model.LimitCPU) {
 		t.Error("should not count self as other pause")
+	}
+}
+
+func TestEnforcementEmitsUsageUpdate(t *testing.T) {
+	m, ms, md, mc, _, bus := newTestManager()
+
+	dockerID := "abcdef123456789000"
+	containerID := dockerID[:12]
+
+	md.AddContainer(dockerID, "test", true)
+	ms.RegisterContainer(dockerID, "test")
+	ms.SetLimit(containerID, model.LimitCPU, 7200)
+
+	cgPath := "/cgroup/test"
+	mc.CgroupPaths[dockerID] = cgPath
+	mc.CPUUsage[cgPath] = 50_000_000
+
+	sub := bus.Subscribe(events.Filter{Types: []events.EventType{events.UsageUpdate}})
+	defer bus.Unsubscribe(sub)
+
+	m.StartContainer(containerID, dockerID)
+	defer m.StopContainer(containerID)
+
+	select {
+	case e := <-sub.C:
+		if e.Type != events.UsageUpdate {
+			t.Errorf("type = %s, want usage_update", e.Type)
+		}
+		if e.ContainerID != containerID {
+			t.Errorf("container = %s, want %s", e.ContainerID, containerID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for usage_update event")
+	}
+}
+
+func TestEnforcementEmitsEnforcementChange(t *testing.T) {
+	m, ms, md, mc, _, bus := newTestManager()
+
+	dockerID := "abcdef123456789000"
+	containerID := dockerID[:12]
+
+	md.AddContainer(dockerID, "test", true)
+	ms.RegisterContainer(dockerID, "test")
+	ms.SetLimit(containerID, model.LimitCPU, 100)
+
+	cgPath := "/cgroup/test"
+	mc.CgroupPaths[dockerID] = cgPath
+	mc.CPUUsage[cgPath] = 200_000_000 // exceeds limit
+
+	sub := bus.Subscribe(events.Filter{Types: []events.EventType{events.EnforcementChange}})
+	defer bus.Unsubscribe(sub)
+
+	m.StartContainer(containerID, dockerID)
+	defer m.StopContainer(containerID)
+
+	select {
+	case e := <-sub.C:
+		if e.Type != events.EnforcementChange {
+			t.Errorf("type = %s, want enforcement_change", e.Type)
+		}
+		if e.ContainerID != containerID {
+			t.Errorf("container = %s, want %s", e.ContainerID, containerID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for enforcement_change event")
 	}
 }

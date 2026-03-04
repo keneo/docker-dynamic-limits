@@ -5,34 +5,40 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/gorilla/websocket"
+	"github.com/keneo/docker-dynamic-limits/internal/events"
 	"github.com/keneo/docker-dynamic-limits/internal/model"
 	"github.com/keneo/docker-dynamic-limits/internal/testutil"
 )
 
-func newTestServer() (*httptest.Server, *testutil.MockStore, *testutil.MockDocker, *testutil.MockEnforcement, *testutil.MockProxy) {
+func newTestServer() (*httptest.Server, *testutil.MockStore, *testutil.MockDocker, *testutil.MockEnforcement, *testutil.MockProxy, *events.Bus) {
 	ms := testutil.NewMockStore()
 	md := testutil.NewMockDocker()
 	me := testutil.NewMockEnforcement()
 	mp := testutil.NewMockProxy()
-	srv := NewServer(ms, md, me, mp)
+	bus := events.NewBus()
+	srv := NewServer(ms, md, me, mp, bus)
 	ts := httptest.NewServer(srv.Handler())
-	return ts, ms, md, me, mp
+	return ts, ms, md, me, mp, bus
 }
 
-func newReadOnlyTestServer() (*httptest.Server, *testutil.MockStore, *testutil.MockDocker, *Server) {
+func newReadOnlyTestServer() (*httptest.Server, *testutil.MockStore, *testutil.MockDocker, *Server, *events.Bus) {
 	ms := testutil.NewMockStore()
 	md := testutil.NewMockDocker()
 	me := testutil.NewMockEnforcement()
 	mp := testutil.NewMockProxy()
-	srv := NewServer(ms, md, me, mp)
+	bus := events.NewBus()
+	srv := NewServer(ms, md, me, mp, bus)
 	ts := httptest.NewServer(srv.ReadOnlyHandler())
-	return ts, ms, md, srv
+	return ts, ms, md, srv, bus
 }
 
 func TestListContainersEmpty(t *testing.T) {
-	ts, _, _, _, _ := newTestServer()
+	ts, _, _, _, _, _ := newTestServer()
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/containers")
@@ -53,7 +59,7 @@ func TestListContainersEmpty(t *testing.T) {
 }
 
 func TestRegisterContainer(t *testing.T) {
-	ts, _, md, me, _ := newTestServer()
+	ts, _, md, me, _, _ := newTestServer()
 	defer ts.Close()
 
 	dockerID := "abcdef123456789000"
@@ -86,7 +92,7 @@ func TestRegisterContainer(t *testing.T) {
 }
 
 func TestRegisterContainerMissingID(t *testing.T) {
-	ts, _, _, _, _ := newTestServer()
+	ts, _, _, _, _, _ := newTestServer()
 	defer ts.Close()
 
 	body, _ := json.Marshal(map[string]string{})
@@ -102,7 +108,7 @@ func TestRegisterContainerMissingID(t *testing.T) {
 }
 
 func TestRegisterContainerNotFound(t *testing.T) {
-	ts, _, _, _, _ := newTestServer()
+	ts, _, _, _, _, _ := newTestServer()
 	defer ts.Close()
 
 	body, _ := json.Marshal(map[string]string{"container_id": "nonexistent"})
@@ -118,7 +124,7 @@ func TestRegisterContainerNotFound(t *testing.T) {
 }
 
 func TestGetContainerInfo(t *testing.T) {
-	ts, ms, _, _, _ := newTestServer()
+	ts, ms, _, _, _, _ := newTestServer()
 	defer ts.Close()
 
 	dockerID := "abcdef123456789000"
@@ -150,7 +156,7 @@ func TestGetContainerInfo(t *testing.T) {
 }
 
 func TestGetContainerNotFound(t *testing.T) {
-	ts, _, _, _, _ := newTestServer()
+	ts, _, _, _, _, _ := newTestServer()
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/containers/nonexistent")
@@ -165,7 +171,7 @@ func TestGetContainerNotFound(t *testing.T) {
 }
 
 func TestDeleteContainer(t *testing.T) {
-	ts, ms, _, me, _ := newTestServer()
+	ts, ms, _, me, _, _ := newTestServer()
 	defer ts.Close()
 
 	dockerID := "abcdef123456789000"
@@ -189,7 +195,7 @@ func TestDeleteContainer(t *testing.T) {
 }
 
 func TestSetLimitSet(t *testing.T) {
-	ts, ms, _, me, _ := newTestServer()
+	ts, ms, _, me, _, _ := newTestServer()
 	defer ts.Close()
 
 	dockerID := "abcdef123456789000"
@@ -225,7 +231,7 @@ func TestSetLimitSet(t *testing.T) {
 }
 
 func TestSetLimitIncrease(t *testing.T) {
-	ts, ms, _, _, _ := newTestServer()
+	ts, ms, _, _, _, _ := newTestServer()
 	defer ts.Close()
 
 	dockerID := "abcdef123456789000"
@@ -249,7 +255,7 @@ func TestSetLimitIncrease(t *testing.T) {
 }
 
 func TestSetLimitDecrease(t *testing.T) {
-	ts, ms, _, _, _ := newTestServer()
+	ts, ms, _, _, _, _ := newTestServer()
 	defer ts.Close()
 
 	dockerID := "abcdef123456789000"
@@ -273,7 +279,7 @@ func TestSetLimitDecrease(t *testing.T) {
 }
 
 func TestSetSpendingLimit(t *testing.T) {
-	ts, ms, _, _, mp := newTestServer()
+	ts, ms, _, _, mp, _ := newTestServer()
 	defer ts.Close()
 
 	dockerID := "abcdef123456789000"
@@ -299,7 +305,7 @@ func TestSetSpendingLimit(t *testing.T) {
 }
 
 func TestGetLimits(t *testing.T) {
-	ts, ms, _, _, _ := newTestServer()
+	ts, ms, _, _, _, _ := newTestServer()
 	defer ts.Close()
 
 	dockerID := "abcdef123456789000"
@@ -321,7 +327,7 @@ func TestGetLimits(t *testing.T) {
 }
 
 func TestGetUsage(t *testing.T) {
-	ts, ms, _, _, _ := newTestServer()
+	ts, ms, _, _, _, _ := newTestServer()
 	defer ts.Close()
 
 	dockerID := "abcdef123456789000"
@@ -342,7 +348,7 @@ func TestGetUsage(t *testing.T) {
 }
 
 func TestSelfUsage(t *testing.T) {
-	ts, ms, _, _, _ := newTestServer()
+	ts, ms, _, _, _, _ := newTestServer()
 	defer ts.Close()
 
 	dockerID := "abcdef123456789000"
@@ -362,7 +368,7 @@ func TestSelfUsage(t *testing.T) {
 }
 
 func TestSelfUsageNoID(t *testing.T) {
-	ts, _, _, _, _ := newTestServer()
+	ts, _, _, _, _, _ := newTestServer()
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/usage")
@@ -377,7 +383,7 @@ func TestSelfUsageNoID(t *testing.T) {
 }
 
 func TestSelfLimits(t *testing.T) {
-	ts, ms, _, _, _ := newTestServer()
+	ts, ms, _, _, _, _ := newTestServer()
 	defer ts.Close()
 
 	dockerID := "abcdef123456789000"
@@ -396,7 +402,7 @@ func TestSelfLimits(t *testing.T) {
 }
 
 func TestMethodNotAllowed(t *testing.T) {
-	ts, _, _, _, _ := newTestServer()
+	ts, _, _, _, _, _ := newTestServer()
 	defer ts.Close()
 
 	resp, err := http.Post(ts.URL+"/containers", "application/json", nil)
@@ -411,7 +417,7 @@ func TestMethodNotAllowed(t *testing.T) {
 }
 
 func TestReadOnlyHandlerAllowsGet(t *testing.T) {
-	ts, ms, md, srv := newReadOnlyTestServer()
+	ts, ms, md, srv, _ := newReadOnlyTestServer()
 	defer ts.Close()
 	defer srv.Stop()
 
@@ -457,7 +463,7 @@ func TestReadOnlyHandlerAllowsGet(t *testing.T) {
 }
 
 func TestReadOnlyIPResolutionUnknownIP(t *testing.T) {
-	ts, ms, md, srv := newReadOnlyTestServer()
+	ts, ms, md, srv, _ := newReadOnlyTestServer()
 	defer ts.Close()
 	defer srv.Stop()
 
@@ -480,7 +486,7 @@ func TestReadOnlyIPResolutionUnknownIP(t *testing.T) {
 }
 
 func TestReadOnlyHandlerBlocksMutations(t *testing.T) {
-	ts, _, _, srv := newReadOnlyTestServer()
+	ts, _, _, srv, _ := newReadOnlyTestServer()
 	defer ts.Close()
 	defer srv.Stop()
 
@@ -529,7 +535,7 @@ func TestReadOnlyHandlerBlocksMutations(t *testing.T) {
 }
 
 func TestReadOnlyHandlerNoContainerSubroutes(t *testing.T) {
-	ts, ms, _, srv := newReadOnlyTestServer()
+	ts, ms, _, srv, _ := newReadOnlyTestServer()
 	defer ts.Close()
 	defer srv.Stop()
 
@@ -564,5 +570,106 @@ func TestReadOnlyHandlerNoContainerSubroutes(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("POST /containers/{id}/clone: status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func wsURL(ts *httptest.Server, path string) string {
+	return "ws" + strings.TrimPrefix(ts.URL, "http") + path
+}
+
+func TestWebSocketConnection(t *testing.T) {
+	ts, _, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL(ts, "/events"), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Errorf("status = %d, want 101", resp.StatusCode)
+	}
+}
+
+func TestWebSocketReceivesLimitChange(t *testing.T) {
+	ts, ms, _, _, _, bus := newTestServer()
+	defer ts.Close()
+
+	dockerID := "abcdef123456789000"
+	ms.RegisterContainer(dockerID, "test")
+	containerID := dockerID[:12]
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL(ts, "/events"), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Publish a limit_change event
+	bus.PublishData(events.LimitChange, containerID, events.LimitChangeData{
+		LimitType: "cpu",
+		OldValue:  100,
+		NewValue:  200,
+		Operation: "increase",
+	})
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var evt events.Event
+	if err := conn.ReadJSON(&evt); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if evt.Type != events.LimitChange {
+		t.Errorf("type = %s, want limit_change", evt.Type)
+	}
+	if evt.ContainerID != containerID {
+		t.Errorf("container = %s, want %s", evt.ContainerID, containerID)
+	}
+}
+
+func TestWebSocketFilterByType(t *testing.T) {
+	ts, _, _, _, _, bus := newTestServer()
+	defer ts.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL(ts, "/events?types=limit_change"), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Publish usage_update (should be filtered out) then limit_change
+	bus.PublishData(events.UsageUpdate, "c1", events.UsageUpdateData{})
+	bus.PublishData(events.LimitChange, "c1", events.LimitChangeData{LimitType: "cpu"})
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var evt events.Event
+	if err := conn.ReadJSON(&evt); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if evt.Type != events.LimitChange {
+		t.Errorf("type = %s, want limit_change (filter should exclude usage_update)", evt.Type)
+	}
+}
+
+func TestWebSocketFilterByContainerID(t *testing.T) {
+	ts, _, _, _, _, bus := newTestServer()
+	defer ts.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL(ts, "/events?container_id=c2"), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	bus.PublishData(events.LimitChange, "c1", events.LimitChangeData{LimitType: "cpu"})
+	bus.PublishData(events.LimitChange, "c2", events.LimitChangeData{LimitType: "ram"})
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var evt events.Event
+	if err := conn.ReadJSON(&evt); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if evt.ContainerID != "c2" {
+		t.Errorf("container = %s, want c2 (filter should exclude c1)", evt.ContainerID)
 	}
 }

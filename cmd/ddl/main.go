@@ -115,6 +115,7 @@ Environment variables:
 	root.AddCommand(cloneCmd())
 	root.AddCommand(lsCmd())
 	root.AddCommand(removeCmd())
+	root.AddCommand(eventsCmd())
 	root.AddCommand(dashboardCmd())
 	root.AddCommand(daemonCmd())
 

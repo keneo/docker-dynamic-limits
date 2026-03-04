@@ -15,6 +15,7 @@ import (
 	"github.com/keneo/docker-dynamic-limits/internal/cgroup"
 	"github.com/keneo/docker-dynamic-limits/internal/docker"
 	"github.com/keneo/docker-dynamic-limits/internal/enforcement"
+	"github.com/keneo/docker-dynamic-limits/internal/events"
 	"github.com/keneo/docker-dynamic-limits/internal/model"
 	"github.com/keneo/docker-dynamic-limits/internal/proxy"
 	"github.com/keneo/docker-dynamic-limits/internal/store"
@@ -85,8 +86,11 @@ func main() {
 		log.Printf("proxy resolve overrides: %v", overrides)
 	}
 
+	// Initialize event bus
+	bus := events.NewBus()
+
 	// Initialize enforcement manager
-	em := enforcement.NewManager(st, dc, cg, px)
+	em := enforcement.NewManager(st, dc, cg, px, bus)
 
 	// Start enforcement for all existing containers
 	if err := em.StartAll(); err != nil {
@@ -94,7 +98,7 @@ func main() {
 	}
 
 	// Create API server
-	srv := api.NewServer(st, dc, em, px)
+	srv := api.NewServer(st, dc, em, px, bus)
 
 	// Try to start the unix socket server for full management API.
 	// If it fails (e.g. path not writable), fall back to full API on TCP.

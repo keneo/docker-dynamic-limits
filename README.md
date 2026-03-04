@@ -184,6 +184,35 @@ ddl remove <container> --json
 ddl limits set <c> cpu 1h --json
 ```
 
+### Real-time events
+
+Stream live events from the daemon via WebSocket:
+
+```bash
+ddl events                                      # stream all events
+ddl events --container my-container              # filter by container
+ddl events --types limit_change                  # filter by event type
+ddl events --types limit_change,enforcement_change
+ddl events --raw                                 # NDJSON output (one JSON object per line)
+ddl events --raw | jq .                          # pipe to jq for pretty-printing
+```
+
+Event types:
+
+| Type | Description | Source |
+|---|---|---|
+| `usage_update` | Per-container usage snapshot | Enforcement loop (~1s per container) |
+| `limit_change` | A limit was set, increased, or decreased | `PUT /containers/{id}/limits` |
+| `enforcement_change` | Enforcement was applied or released | Enforcement manager |
+| `container_register` | A new container was registered | `POST /register` or clone |
+| `container_remove` | A container was removed | `DELETE /containers/{id}` |
+
+The WebSocket endpoint is `GET /events` with optional query parameters:
+- `container_id` — comma-separated container IDs to filter
+- `types` — comma-separated event types to filter
+
+**Note:** WebSocket is not available via the docker exec transport (macOS fallback). Use `--sock` or `DDL_SOCK` to connect via unix socket, or `--api` for TCP.
+
 ## Web dashboard
 
 A browser-based UI for real-time monitoring and management:
@@ -242,6 +271,7 @@ The daemon exposes two interfaces:
 | `POST` | `/containers/{id}/clone` | Clone container with limits |
 | `GET` | `/usage` | In-container usage self-query |
 | `GET` | `/limits` | In-container limits self-query |
+| `GET` | `/events` | WebSocket event stream (query: `container_id`, `types`) |
 
 **Read-only API** (TCP — for containers):
 
@@ -250,6 +280,7 @@ The daemon exposes two interfaces:
 | `GET` | `/containers` | List all managed containers |
 | `GET` | `/usage` | Self-query usage + limits (by source IP) |
 | `GET` | `/limits` | Self-query limits (by source IP) |
+| `GET` | `/events` | WebSocket event stream (query: `container_id`, `types`) |
 
 ## Using LLMs with spending limits
 
