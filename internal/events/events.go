@@ -15,6 +15,10 @@ const (
 	EnforcementChange  EventType = "enforcement_change"
 	ContainerRegister  EventType = "container_register"
 	ContainerRemove    EventType = "container_remove"
+	OllamaEnqueue      EventType = "ollama_enqueue"
+	OllamaDequeue      EventType = "ollama_dequeue"
+	OllamaCancel       EventType = "ollama_cancel"
+	OllamaBidChange    EventType = "ollama_bid_change"
 )
 
 // Event is the top-level envelope sent to subscribers.
@@ -54,6 +58,29 @@ type ContainerRegisterData struct {
 
 // ContainerRemoveData is the payload for container_remove events.
 type ContainerRemoveData struct{}
+
+// OllamaEnqueueData is the payload for ollama_enqueue events.
+type OllamaEnqueueData struct {
+	Model string `json:"model"`
+	Bid   int64  `json:"bid"`
+}
+
+// OllamaDequeueData is the payload for ollama_dequeue events.
+type OllamaDequeueData struct {
+	Model       string  `json:"model"`
+	WallSeconds float64 `json:"wall_seconds"`
+	Cost        int64   `json:"cost"`
+}
+
+// OllamaCancelData is the payload for ollama_cancel events.
+type OllamaCancelData struct {
+	Reason string `json:"reason"` // "timeout", "cancelled", "removed"
+}
+
+// OllamaBidChangeData is the payload for ollama_bid_change events.
+type OllamaBidChangeData struct {
+	Bid int64 `json:"bid"`
+}
 
 // Filter controls which events a subscriber receives.
 type Filter struct {

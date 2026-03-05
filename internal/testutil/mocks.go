@@ -615,3 +615,10 @@ func (p *MockProxy) GetBudget(containerID string) int64 {
 	defer p.mu.Unlock()
 	return p.Budgets[containerID]
 }
+
+// AddSpending adds milliCents to the spending for a container.
+func (p *MockProxy) AddSpending(containerID string, milliCents int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.Spending[containerID] += milliCents
+}

@@ -31,12 +31,17 @@ Event types:
   enforcement_change  Enforcement was applied or released
   container_register  A new container was registered
   container_remove    A container was removed from management
+  ollama_enqueue      An Ollama inference request was queued
+  ollama_dequeue      An Ollama inference request completed
+  ollama_cancel       An Ollama inference request was cancelled
+  ollama_bid_change   A container's Ollama bid was changed
 
 Examples:
   ddl events                                    # stream all events
   ddl events --container my-container           # filter by container
   ddl events --types limit_change               # filter by event type
   ddl events --types limit_change,enforcement_change
+  ddl events --types ollama_enqueue,ollama_dequeue
   ddl events --raw                              # NDJSON output
   ddl events --raw | jq .                       # pipe to jq
   ddl events --json                             # same as --raw
@@ -175,6 +180,37 @@ Use --sock or DDL_SOCK to connect via unix socket, or --api to connect via TCP.`
 					}
 				case "container_remove":
 					fmt.Println("  removed")
+				case "ollama_enqueue":
+					var d struct {
+						Model string `json:"model"`
+						Bid   int64  `json:"bid"`
+					}
+					if json.Unmarshal(evt.Data, &d) == nil {
+						fmt.Printf("  model=%s bid=%d milli-cents/wall-sec\n", d.Model, d.Bid)
+					}
+				case "ollama_dequeue":
+					var d struct {
+						Model       string  `json:"model"`
+						WallSeconds float64 `json:"wall_seconds"`
+						Cost        int64   `json:"cost"`
+					}
+					if json.Unmarshal(evt.Data, &d) == nil {
+						fmt.Printf("  model=%s wall=%.1fs cost=%d milli-cents\n", d.Model, d.WallSeconds, d.Cost)
+					}
+				case "ollama_cancel":
+					var d struct {
+						Reason string `json:"reason"`
+					}
+					if json.Unmarshal(evt.Data, &d) == nil {
+						fmt.Printf("  reason=%s\n", d.Reason)
+					}
+				case "ollama_bid_change":
+					var d struct {
+						Bid int64 `json:"bid"`
+					}
+					if json.Unmarshal(evt.Data, &d) == nil {
+						fmt.Printf("  bid=%d milli-cents/wall-sec\n", d.Bid)
+					}
 				}
 				fmt.Println()
 			}

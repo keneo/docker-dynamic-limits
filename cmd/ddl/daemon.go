@@ -53,15 +53,24 @@ Builds the Docker image on first run (or with --build). The daemon
 container mounts the Docker socket, cgroup filesystem, and a
 persistent volume for the SQLite database.
 
-API keys for the spending proxy can be passed via environment variables:
-  DDL_ANTHROPIC_API_KEY   Anthropic API key
-  DDL_OPENAI_API_KEY      OpenAI API key
+Environment variables:
+  DDL_ANTHROPIC_API_KEY     Anthropic API key for spending proxy
+  DDL_OPENAI_API_KEY        OpenAI API key for spending proxy
+  DDL_OLLAMA_URL            Ollama server URL (e.g. http://192.168.1.100:11434)
+  DDL_OLLAMA_MODELS         Comma-separated allowed model names
+  DDL_OLLAMA_MAX_QUEUE      Max queue size (default 50)
+  DDL_OLLAMA_TIMEOUT        Request timeout (default 120s)
+  DDL_OLLAMA_DEFAULT_BID    Default bid in milli-cents/wall-second (default 0)
+  DDL_ENABLE_OPENAI         Enable OpenAI proxy (default: true if key set)
+  DDL_ENABLE_ANTHROPIC      Enable Anthropic proxy (default: true if key set)
+  DDL_ENABLE_OLLAMA         Enable Ollama proxy (default: true if URL set)
 
 Examples:
   ddl daemon start
   ddl daemon start --build
   ddl daemon start --port 8080
-  DDL_ANTHROPIC_API_KEY=sk-ant-... ddl daemon start --build`,
+  DDL_ANTHROPIC_API_KEY=sk-ant-... ddl daemon start --build
+  DDL_OLLAMA_URL=http://gpu-server:11434 DDL_OLLAMA_MODELS=llama3.2:3b ddl daemon start --build`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Check if container already exists and is running
 			state, _ := inspectContainerState(daemonContainerName)
@@ -101,8 +110,13 @@ Examples:
 				"-p", fmt.Sprintf("%d:7123", port),
 			}
 
-			// Forward API key env vars to daemon container
-			for _, envVar := range []string{"DDL_ANTHROPIC_API_KEY", "DDL_OPENAI_API_KEY"} {
+			// Forward env vars to daemon container
+			for _, envVar := range []string{
+				"DDL_ANTHROPIC_API_KEY", "DDL_OPENAI_API_KEY",
+				"DDL_OLLAMA_URL", "DDL_OLLAMA_MODELS", "DDL_OLLAMA_MAX_QUEUE",
+				"DDL_OLLAMA_TIMEOUT", "DDL_OLLAMA_DEFAULT_BID",
+				"DDL_ENABLE_OPENAI", "DDL_ENABLE_ANTHROPIC", "DDL_ENABLE_OLLAMA",
+			} {
 				if val := os.Getenv(envVar); val != "" {
 					runArgs = append(runArgs, "-e", envVar+"="+val)
 				}

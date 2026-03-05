@@ -15,6 +15,7 @@ import (
 	"github.com/keneo/docker-dynamic-limits/internal/enforcement"
 	"github.com/keneo/docker-dynamic-limits/internal/events"
 	"github.com/keneo/docker-dynamic-limits/internal/model"
+	"github.com/keneo/docker-dynamic-limits/internal/ollama"
 	"github.com/keneo/docker-dynamic-limits/internal/proxy"
 	"github.com/keneo/docker-dynamic-limits/internal/store"
 )
@@ -26,6 +27,7 @@ type Server struct {
 	enforcement enforcement.EnforcementController
 	proxy       proxy.SpendingProxy
 	bus         *events.Bus
+	ollama      *ollama.Queue
 	mux         *http.ServeMux
 
 	ipMu  sync.RWMutex
@@ -33,14 +35,15 @@ type Server struct {
 	done  chan struct{}
 }
 
-// NewServer creates a new API server.
-func NewServer(st store.DataStore, dc docker.DockerClient, em enforcement.EnforcementController, px proxy.SpendingProxy, bus *events.Bus) *Server {
+// NewServer creates a new API server. oq may be nil when Ollama is not configured.
+func NewServer(st store.DataStore, dc docker.DockerClient, em enforcement.EnforcementController, px proxy.SpendingProxy, bus *events.Bus, oq *ollama.Queue) *Server {
 	s := &Server{
 		store:       st,
 		docker:      dc,
 		enforcement: em,
 		proxy:       px,
 		bus:         bus,
+		ollama:      oq,
 		mux:         http.NewServeMux(),
 		ipMap:       make(map[string]string),
 		done:        make(chan struct{}),
@@ -64,6 +67,11 @@ func (s *Server) registerRoutes() {
 	// In-container query endpoints (container identifies itself by source IP or token)
 	s.mux.HandleFunc("/usage", s.handleSelfUsage)
 	s.mux.HandleFunc("/limits", s.handleSelfLimits)
+	// Ollama queue endpoints (full API)
+	s.mux.HandleFunc("/ollama/queue", s.handleOllamaQueue)
+	s.mux.HandleFunc("/ollama/models", s.handleOllamaModels)
+	// Provider management
+	s.mux.HandleFunc("/providers", s.handleProviders)
 }
 
 // Handler returns the HTTP handler (full API).
@@ -80,6 +88,10 @@ func (s *Server) ReadOnlyHandler() http.Handler {
 	mux.HandleFunc("/events", s.handleEvents)
 	mux.HandleFunc("/usage", s.handleSelfUsageByIP)
 	mux.HandleFunc("/limits", s.handleSelfLimitsByIP)
+	// Ollama container-facing endpoints (identified by source IP)
+	mux.HandleFunc("/ollama/queue", s.handleOllamaQueue)
+	mux.HandleFunc("/ollama/models", s.handleOllamaModels)
+	mux.HandleFunc("/ollama/bid", s.handleOllamaBidByIP)
 	return mux
 }
 
@@ -170,11 +182,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, map[string]interface{}{
-		"id":          c.ID,
-		"docker_id":   c.DockerID,
-		"name":        c.Name,
-		"registered_at": c.RegisteredAt,
-		"proxy_addr":  proxyAddr,
+		"id":               c.ID,
+		"docker_id":        c.DockerID,
+		"name":             c.Name,
+		"registered_at":    c.RegisteredAt,
+		"proxy_addr":       proxyAddr,
+		"ollama_available": s.ollama != nil,
 	})
 }
 
@@ -195,13 +208,18 @@ func (s *Server) handleContainer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch parts[1] {
-	case "limits":
+	sub := parts[1]
+	switch {
+	case sub == "limits":
 		s.handleLimits(w, r, containerID)
-	case "usage":
+	case sub == "usage":
 		s.handleUsage(w, r, containerID)
-	case "clone":
+	case sub == "clone":
 		s.handleClone(w, r, containerID)
+	case sub == "ollama/bid":
+		s.handleOllamaBidForContainer(w, r, containerID)
+	case sub == "ollama/queue":
+		s.handleOllamaCancelForContainer(w, r, containerID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -215,6 +233,9 @@ func (s *Server) handleContainerInfo(w http.ResponseWriter, r *http.Request, con
 
 	if r.Method == http.MethodDelete {
 		s.enforcement.StopContainer(containerID)
+		if s.ollama != nil {
+			s.ollama.RemoveContainer(containerID)
+		}
 		if err := s.store.RemoveContainer(containerID); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -592,6 +613,146 @@ func (s *Server) buildStatus(c model.Container) model.ContainerStatus {
 		Enforced:  enforced,
 		State:     state,
 		ProxyAddr: proxyAddr,
+	}
+}
+
+// --- Ollama queue endpoints ---
+
+func (s *Server) handleOllamaQueue(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.ollama == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("ollama not configured"))
+		return
+	}
+	writeJSON(w, s.ollama.QueueStatus())
+}
+
+func (s *Server) handleOllamaModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.ollama == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("ollama not configured"))
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"models": s.ollama.AllowedModels(),
+	})
+}
+
+func (s *Server) handleOllamaBidForContainer(w http.ResponseWriter, r *http.Request, containerID string) {
+	if s.ollama == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("ollama not configured"))
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]interface{}{
+			"bid": s.ollama.GetBid(containerID),
+		})
+	case http.MethodPut:
+		var req struct {
+			Bid int64 `json:"bid"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		s.ollama.SetBid(containerID, req.Bid)
+		writeJSON(w, map[string]interface{}{
+			"bid": req.Bid,
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleOllamaCancelForContainer(w http.ResponseWriter, r *http.Request, containerID string) {
+	if s.ollama == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("ollama not configured"))
+		return
+	}
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ok := s.ollama.CancelEntry(containerID)
+	writeJSON(w, map[string]interface{}{
+		"cancelled": ok,
+	})
+}
+
+func (s *Server) handleOllamaBidByIP(w http.ResponseWriter, r *http.Request) {
+	if s.ollama == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("ollama not configured"))
+		return
+	}
+
+	ip := extractIP(r.RemoteAddr)
+	containerID := s.resolveContainerByIP(ip)
+	if containerID == "" {
+		writeError(w, http.StatusForbidden, fmt.Errorf("unknown container"))
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]interface{}{
+			"bid": s.ollama.GetBid(containerID),
+		})
+	case http.MethodPut:
+		var req struct {
+			Bid int64 `json:"bid"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		s.ollama.SetBid(containerID, req.Bid)
+		writeJSON(w, map[string]interface{}{
+			"bid": req.Bid,
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// --- Provider management ---
+
+func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		// Return provider enabled states
+		result := map[string]interface{}{
+			"ollama_available": s.ollama != nil,
+		}
+		if st, ok := s.proxy.(*proxy.SpendingTracker); ok {
+			result["enabled"] = st.GetEnabledHosts()
+		}
+		writeJSON(w, result)
+	case http.MethodPut:
+		st, ok := s.proxy.(*proxy.SpendingTracker)
+		if !ok {
+			writeError(w, http.StatusNotImplemented, fmt.Errorf("provider management not available"))
+			return
+		}
+		var req map[string]bool
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		for host, enabled := range req {
+			st.EnableHost(host, enabled)
+		}
+		writeJSON(w, map[string]interface{}{
+			"enabled": st.GetEnabledHosts(),
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 

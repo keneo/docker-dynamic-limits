@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/keneo/docker-dynamic-limits/internal/api"
 	"github.com/keneo/docker-dynamic-limits/internal/cgroup"
@@ -17,6 +19,7 @@ import (
 	"github.com/keneo/docker-dynamic-limits/internal/enforcement"
 	"github.com/keneo/docker-dynamic-limits/internal/events"
 	"github.com/keneo/docker-dynamic-limits/internal/model"
+	"github.com/keneo/docker-dynamic-limits/internal/ollama"
 	"github.com/keneo/docker-dynamic-limits/internal/proxy"
 	"github.com/keneo/docker-dynamic-limits/internal/store"
 )
@@ -86,6 +89,16 @@ func main() {
 		log.Printf("proxy resolve overrides: %v", overrides)
 	}
 
+	// Provider enable/disable flags
+	enabledHosts := map[string]bool{}
+	if envBoolOr("DDL_ENABLE_OPENAI", os.Getenv("DDL_OPENAI_API_KEY") != "") {
+		enabledHosts["api.openai.com"] = true
+	}
+	if envBoolOr("DDL_ENABLE_ANTHROPIC", os.Getenv("DDL_ANTHROPIC_API_KEY") != "") {
+		enabledHosts["api.anthropic.com"] = true
+	}
+	px.SetEnabledHosts(enabledHosts)
+
 	// Initialize event bus
 	bus := events.NewBus()
 
@@ -97,8 +110,26 @@ func main() {
 		log.Printf("warning: failed to start enforcement for existing containers: %v", err)
 	}
 
+	// Ollama queue
+	var oq *ollama.Queue
+	ollamaURL := os.Getenv("DDL_OLLAMA_URL")
+	if ollamaURL != "" && envBoolOr("DDL_ENABLE_OLLAMA", true) {
+		cfg := ollama.Config{
+			OllamaURL:      ollamaURL,
+			AllowedModels:  parseCSV(os.Getenv("DDL_OLLAMA_MODELS")),
+			MaxQueueSize:   parseIntOr(os.Getenv("DDL_OLLAMA_MAX_QUEUE"), 50),
+			RequestTimeout: parseDurationOr(os.Getenv("DDL_OLLAMA_TIMEOUT"), 120*time.Second),
+			DefaultBid:     int64(parseIntOr(os.Getenv("DDL_OLLAMA_DEFAULT_BID"), 0)),
+		}
+		oq = ollama.NewQueue(cfg, px, st, bus)
+		px.SetOllamaHandler(oq)
+		px.EnableHost("ollama", true)
+		defer oq.Stop()
+		log.Printf("Ollama proxy configured: %s (models: %v)", ollamaURL, cfg.AllowedModels)
+	}
+
 	// Create API server
-	srv := api.NewServer(st, dc, em, px, bus)
+	srv := api.NewServer(st, dc, em, px, bus, oq)
 
 	// Try to start the unix socket server for full management API.
 	// If it fails (e.g. path not writable), fall back to full API on TCP.
@@ -170,5 +201,54 @@ func dirOf(path string) string {
 		}
 	}
 	return ""
+}
+
+func envBoolOr(key string, defaultVal bool) bool {
+	v := os.Getenv(key)
+	switch strings.ToLower(v) {
+	case "false", "0", "no":
+		return false
+	case "true", "1", "yes":
+		return true
+	default:
+		return defaultVal
+	}
+}
+
+func parseCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	var result []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+func parseIntOr(s string, defaultVal int) int {
+	if s == "" {
+		return defaultVal
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		return defaultVal
+	}
+	return v
+}
+
+func parseDurationOr(s string, defaultVal time.Duration) time.Duration {
+	if s == "" {
+		return defaultVal
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return defaultVal
+	}
+	return d
 }
 

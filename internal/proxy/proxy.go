@@ -19,6 +19,13 @@ type SpendingProxy interface {
 	GetSpending(containerID string) int64
 	SetSpending(containerID string, cents int64)
 	GetProxyAddr(containerID string) string
+	AddSpending(containerID string, milliCents int64)
+}
+
+// OllamaHandler is the interface the proxy uses to dispatch Ollama requests.
+type OllamaHandler interface {
+	HandleRequest(containerID string, w http.ResponseWriter, r *http.Request)
+	OllamaHost() string
 }
 
 // SpendingTracker tracks API spending per container via an HTTP forward proxy.
@@ -40,6 +47,10 @@ type SpendingTracker struct {
 	onSpendingUpdate func(containerID string, totalCents int64)
 	// transport is the HTTP transport used for outgoing requests (nil = http.DefaultTransport)
 	transport http.RoundTripper
+	// enabledHosts tracks which provider hosts are enabled for proxying
+	enabledHosts map[string]bool
+	// ollamaQueue handles Ollama inference requests (nil when Ollama not configured)
+	ollamaQueue OllamaHandler
 }
 
 // ModelPricing holds per-token costs in micro-cents.
@@ -58,6 +69,7 @@ func NewSpendingTracker(onUpdate func(containerID string, totalCents int64)) *Sp
 		prices:           defaultPrices(),
 		apiKeys:          make(map[string]string),
 		onSpendingUpdate: onUpdate,
+		enabledHosts:     make(map[string]bool),
 	}
 }
 
@@ -143,8 +155,74 @@ func (st *SpendingTracker) SetAPIKeys(keys map[string]string) {
 	}
 }
 
+// AddSpending adds milliCents to the spending for a container.
+func (st *SpendingTracker) AddSpending(containerID string, milliCents int64) {
+	st.mu.Lock()
+	st.spending[containerID] += milliCents * 1_000 // milli-cents → micro-cents
+	newTotal := st.spending[containerID]
+	st.mu.Unlock()
+	if st.onSpendingUpdate != nil {
+		st.onSpendingUpdate(containerID, newTotal/1_000)
+	}
+}
+
+// SetOllamaHandler sets the handler for Ollama inference requests.
+func (st *SpendingTracker) SetOllamaHandler(h OllamaHandler) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.ollamaQueue = h
+}
+
+// SetEnabledHosts sets which provider hosts are enabled.
+func (st *SpendingTracker) SetEnabledHosts(hosts map[string]bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.enabledHosts = make(map[string]bool)
+	for k, v := range hosts {
+		st.enabledHosts[k] = v
+	}
+}
+
+// EnableHost enables or disables a provider host at runtime.
+func (st *SpendingTracker) EnableHost(host string, enabled bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.enabledHosts[host] = enabled
+}
+
+// GetEnabledHosts returns a copy of the enabled hosts map.
+func (st *SpendingTracker) GetEnabledHosts() map[string]bool {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	result := make(map[string]bool)
+	for k, v := range st.enabledHosts {
+		result[k] = v
+	}
+	return result
+}
+
+func (st *SpendingTracker) isOllamaHost(host string) bool {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	if st.ollamaQueue == nil || !st.enabledHosts["ollama"] {
+		return false
+	}
+	return stripPort(host) == st.ollamaQueue.OllamaHost()
+}
+
 func (st *SpendingTracker) proxyHandler(containerID string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Dispatch Ollama requests to the queue handler
+		if st.isOllamaHost(r.Host) {
+			st.mu.RLock()
+			oq := st.ollamaQueue
+			st.mu.RUnlock()
+			if oq != nil {
+				oq.HandleRequest(containerID, w, r)
+				return
+			}
+		}
+
 		// Check if budget is exceeded before proxying
 		st.mu.RLock()
 		budget := st.budgets[containerID]
@@ -257,7 +335,17 @@ func IsTrackedAPIHost(host string) bool {
 }
 
 func (st *SpendingTracker) isTrackedAPI(host string) bool {
-	return IsTrackedAPIHost(host)
+	if !IsTrackedAPIHost(host) {
+		return false
+	}
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	// If enabledHosts is empty (no explicit config), fall back to checking IsTrackedAPIHost only
+	if len(st.enabledHosts) == 0 {
+		return true
+	}
+	h := stripPort(host)
+	return st.enabledHosts[h]
 }
 
 // apiUsage is the common usage structure in API responses.

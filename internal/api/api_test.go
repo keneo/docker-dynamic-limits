@@ -21,7 +21,7 @@ func newTestServer() (*httptest.Server, *testutil.MockStore, *testutil.MockDocke
 	me := testutil.NewMockEnforcement()
 	mp := testutil.NewMockProxy()
 	bus := events.NewBus()
-	srv := NewServer(ms, md, me, mp, bus)
+	srv := NewServer(ms, md, me, mp, bus, nil)
 	ts := httptest.NewServer(srv.Handler())
 	return ts, ms, md, me, mp, bus
 }
@@ -32,7 +32,7 @@ func newReadOnlyTestServer() (*httptest.Server, *testutil.MockStore, *testutil.M
 	me := testutil.NewMockEnforcement()
 	mp := testutil.NewMockProxy()
 	bus := events.NewBus()
-	srv := NewServer(ms, md, me, mp, bus)
+	srv := NewServer(ms, md, me, mp, bus, nil)
 	ts := httptest.NewServer(srv.ReadOnlyHandler())
 	return ts, ms, md, srv, bus
 }
@@ -677,5 +677,95 @@ func TestWebSocketFilterByContainerID(t *testing.T) {
 	}
 	if evt.ContainerID != "c2" {
 		t.Errorf("container = %s, want c2 (filter should exclude c1)", evt.ContainerID)
+	}
+}
+
+func TestOllamaQueueEndpointNotConfigured(t *testing.T) {
+	ts, _, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/ollama/queue")
+	if err != nil {
+		t.Fatalf("GET /ollama/queue: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (ollama not configured)", resp.StatusCode)
+	}
+}
+
+func TestOllamaModelsEndpointNotConfigured(t *testing.T) {
+	ts, _, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/ollama/models")
+	if err != nil {
+		t.Fatalf("GET /ollama/models: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (ollama not configured)", resp.StatusCode)
+	}
+}
+
+func TestProvidersEndpoint(t *testing.T) {
+	ts, _, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/providers")
+	if err != nil {
+		t.Fatalf("GET /providers: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["ollama_available"] != false {
+		t.Errorf("ollama_available = %v, want false", result["ollama_available"])
+	}
+}
+
+func TestDeleteContainerRemovesOllama(t *testing.T) {
+	// When ollama is nil, delete should not crash
+	ts, ms, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	dockerID := "abcdef123456789000"
+	c, _ := ms.RegisterContainer(dockerID, "test")
+
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/containers/"+c.ID, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestRegisterIncludesOllamaAvailable(t *testing.T) {
+	ts, _, md, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	dockerID := "abcdef123456789000"
+	md.AddContainer(dockerID, "test-container", true)
+
+	body, _ := json.Marshal(map[string]string{"container_id": dockerID})
+	resp, err := http.Post(ts.URL+"/register", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /register: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["ollama_available"] != false {
+		t.Errorf("ollama_available = %v, want false", result["ollama_available"])
 	}
 }

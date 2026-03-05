@@ -240,3 +240,76 @@ func TestSpendingTrackerCumulativeSpending(t *testing.T) {
 		t.Errorf("spending should accumulate, got %d micro-cents", st.spending["c1"])
 	}
 }
+
+func TestAddSpending(t *testing.T) {
+	var callbackTotal int64
+	st := NewSpendingTracker(func(containerID string, total int64) {
+		callbackTotal = total
+	})
+	st.spending["c1"] = 0
+
+	st.AddSpending("c1", 500) // 500 milli-cents
+	if st.GetSpending("c1") != 500 {
+		t.Errorf("spending = %d, want 500 milli-cents", st.GetSpending("c1"))
+	}
+	if callbackTotal != 500 {
+		t.Errorf("callback total = %d, want 500", callbackTotal)
+	}
+
+	st.AddSpending("c1", 300)
+	if st.GetSpending("c1") != 800 {
+		t.Errorf("spending = %d, want 800 milli-cents", st.GetSpending("c1"))
+	}
+}
+
+func TestEnabledHosts(t *testing.T) {
+	st := NewSpendingTracker(nil)
+
+	st.SetEnabledHosts(map[string]bool{
+		"api.openai.com":    true,
+		"api.anthropic.com": false,
+	})
+
+	hosts := st.GetEnabledHosts()
+	if !hosts["api.openai.com"] {
+		t.Error("api.openai.com should be enabled")
+	}
+	if hosts["api.anthropic.com"] {
+		t.Error("api.anthropic.com should be disabled")
+	}
+
+	st.EnableHost("api.anthropic.com", true)
+	hosts = st.GetEnabledHosts()
+	if !hosts["api.anthropic.com"] {
+		t.Error("api.anthropic.com should be enabled after EnableHost")
+	}
+}
+
+func TestIsTrackedAPIWithEnabledHosts(t *testing.T) {
+	st := NewSpendingTracker(nil)
+
+	// With no enabledHosts configured (empty map), all tracked hosts pass
+	if !st.isTrackedAPI("api.openai.com") {
+		t.Error("api.openai.com should be tracked with empty enabledHosts")
+	}
+
+	// With enabledHosts set, only enabled ones are tracked
+	st.SetEnabledHosts(map[string]bool{
+		"api.openai.com": true,
+	})
+	if !st.isTrackedAPI("api.openai.com") {
+		t.Error("api.openai.com should be tracked when enabled")
+	}
+	if st.isTrackedAPI("api.anthropic.com") {
+		t.Error("api.anthropic.com should NOT be tracked when not in enabledHosts")
+	}
+}
+
+func TestOllamaHostDispatch(t *testing.T) {
+	st := NewSpendingTracker(nil)
+
+	// Without Ollama configured, isOllamaHost always false
+	if st.isOllamaHost("192.168.1.100") {
+		t.Error("should not be Ollama host without handler")
+	}
+}

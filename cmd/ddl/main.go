@@ -76,10 +76,18 @@ All commands support --json for machine-readable output:
   ddl usage-all --json
 
 Environment variables:
-  DDL_API_URL             Override the daemon API URL (default http://localhost:7123)
-  DDL_SOCK                Override the unix socket path
-  DDL_ANTHROPIC_API_KEY   Anthropic API key for spending proxy relay
-  DDL_OPENAI_API_KEY      OpenAI API key for spending proxy relay`,
+  DDL_API_URL               Override the daemon API URL (default http://localhost:7123)
+  DDL_SOCK                  Override the unix socket path
+  DDL_ANTHROPIC_API_KEY     Anthropic API key for spending proxy relay
+  DDL_OPENAI_API_KEY        OpenAI API key for spending proxy relay
+  DDL_OLLAMA_URL            Ollama server URL (enables Ollama inference proxy)
+  DDL_OLLAMA_MODELS         Comma-separated allowed models (e.g. llama3.2:3b,qwen3:8b)
+  DDL_OLLAMA_MAX_QUEUE      Max queue size (default 50)
+  DDL_OLLAMA_TIMEOUT        Request timeout (default 120s)
+  DDL_OLLAMA_DEFAULT_BID    Default bid in milli-cents per wall-second (default 0)
+  DDL_ENABLE_OPENAI         Enable/disable OpenAI proxy (true/false)
+  DDL_ENABLE_ANTHROPIC      Enable/disable Anthropic proxy (true/false)
+  DDL_ENABLE_OLLAMA         Enable/disable Ollama proxy (true/false)`,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			// Determine socket path: explicit flag/env > auto-detect > docker exec fallback > TCP
 			if sockPath != "" {

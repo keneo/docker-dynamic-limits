@@ -206,6 +206,10 @@ Event types:
 | `enforcement_change` | Enforcement was applied or released | Enforcement manager |
 | `container_register` | A new container was registered | `POST /register` or clone |
 | `container_remove` | A container was removed | `DELETE /containers/{id}` |
+| `ollama_enqueue` | Ollama inference request queued | Proxy → Ollama queue |
+| `ollama_dequeue` | Ollama inference request completed | Queue processor |
+| `ollama_cancel` | Ollama request cancelled/timed out | Queue timeout/cancel |
+| `ollama_bid_change` | Container's Ollama bid changed | `PUT /ollama/bid` |
 
 The WebSocket endpoint is `GET /events` with optional query parameters:
 - `container_id` — comma-separated container IDs to filter
@@ -390,6 +394,129 @@ Request #4: HTTP 429 — Budget exceeded!
 ### Non-API traffic
 
 Requests to non-tracked hosts (anything other than `api.openai.com` and `api.anthropic.com`) pass through the proxy unmodified and are never blocked by the spending budget. Only LLM API calls count toward spending.
+
+### Provider enable/disable
+
+Each proxy target (OpenAI, Anthropic, Ollama) can be enabled or disabled at startup via env vars and at runtime via the API:
+
+**Startup env vars:**
+```
+DDL_ENABLE_OPENAI=true        # Default: true if DDL_OPENAI_API_KEY set
+DDL_ENABLE_ANTHROPIC=true     # Default: true if DDL_ANTHROPIC_API_KEY set
+DDL_ENABLE_OLLAMA=true        # Default: true if DDL_OLLAMA_URL set
+```
+
+**Runtime API** (full API, unix socket):
+```bash
+# List provider states
+curl --unix-socket /var/run/ddl/ddl.sock http://localhost/providers
+
+# Toggle providers
+curl --unix-socket /var/run/ddl/ddl.sock -X PUT http://localhost/providers \
+  -d '{"openai": true, "anthropic": false, "ollama": true}'
+```
+
+## Ollama inference proxy
+
+Share a single Ollama GPU server across multiple containers with fair access via a bid-based priority queue. The GPU is a serialized resource — the queue ensures one inference at a time with priority based on container bids.
+
+### How it works
+
+```
+Container                     Per-container Proxy              Queue Processor          Ollama
+    |                              |                                |                     |
+    | curl -x http://proxy:PORT    |                                |                     |
+    |   http://ollama:11434/api/chat                                |                     |
+    |----------------------------->|                                |                     |
+    |                              |-- enqueue (bid=150) --------->|                     |
+    |   (HTTP blocks, waiting)     |                                |-- wait for turn --> |
+    |                              |                                |-- POST /api/chat ->|
+    |                              |                                |<-- response --------|
+    |                              |<-- charge wall-clock time ----|                     |
+    |<--- JSON response -----------|                                |                     |
+```
+
+Containers use the same per-container HTTP proxy as OpenAI/Anthropic. The proxy identifies the provider by `Host` header — when the host matches the configured Ollama URL, requests are routed to the inference queue.
+
+### Configuration
+
+| Variable | Description | Default |
+|---|---|---|
+| `DDL_OLLAMA_URL` | Ollama server URL (e.g. `http://192.168.1.100:11434`) | — (disabled) |
+| `DDL_OLLAMA_MODELS` | Comma-separated allowed model names | — (all allowed) |
+| `DDL_OLLAMA_MAX_QUEUE` | Maximum queue size | `50` |
+| `DDL_OLLAMA_TIMEOUT` | Request timeout for Ollama HTTP call | `120s` |
+| `DDL_OLLAMA_DEFAULT_BID` | Default bid in milli-cents per wall-second | `0` |
+| `DDL_ENABLE_OLLAMA` | Enable/disable Ollama proxy | `true` if URL set |
+
+### Usage
+
+```bash
+# Start daemon with Ollama configured
+DDL_OLLAMA_URL=http://gpu-server:11434 DDL_OLLAMA_MODELS=llama3.2:3b,qwen3:8b \
+  ddl daemon start --build
+
+# Register a container and set spending limit
+ddl register <container>
+ddl limits set <container> spending 10.00
+
+# From inside the container: set a bid (via TCP API on :7123)
+curl -X PUT http://host.docker.internal:7123/ollama/bid -d '{"bid":100}'
+
+# Send an inference request through the proxy
+curl -x http://<proxy-addr> http://gpu-server:11434/api/chat \
+  -d '{"model":"llama3.2:3b","messages":[{"role":"user","content":"Hello"}]}'
+
+# Check queue status
+curl http://host.docker.internal:7123/ollama/queue
+
+# Check allowed models
+curl http://host.docker.internal:7123/ollama/models
+
+# Monitor events
+ddl events --types ollama_enqueue,ollama_dequeue
+```
+
+### Billing
+
+Ollama requests are billed based on **wall-clock time** (not GPU time):
+
+```
+cost = wall_seconds × bid (milli-cents per wall-second)
+```
+
+Wall-clock time includes model loading, VRAM allocation, prompt eval, and generation. Containers that trigger cold model loads pay for the loading time. Cost is charged to the container's spending budget via `AddSpending`.
+
+### Queue semantics
+
+- **Priority**: Higher bid is served first. Equal bids are FIFO.
+- **One per container**: Each container can have at most one pending/active request at a time.
+- **Queue timeout**: Requests can include `"queue_timeout": <seconds>` in the body. If the request doesn't start within that time, it returns HTTP 408.
+- **Streaming disabled**: All requests are forced to `"stream": false` for queue fairness.
+- **Supported paths**: Only `POST /api/chat` and `POST /api/generate` are accepted.
+
+### REST API additions
+
+**Full API** (unix socket):
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/ollama/queue` | View queue state (active + pending entries) |
+| `GET` | `/ollama/models` | List allowed models |
+| `PUT` | `/containers/{id}/ollama/bid` | Set bid for container `{"bid": 150}` |
+| `GET` | `/containers/{id}/ollama/bid` | Get bid for container |
+| `DELETE` | `/containers/{id}/ollama/queue` | Cancel pending request for container |
+| `GET` | `/providers` | List provider enable states |
+| `PUT` | `/providers` | Toggle providers `{"ollama": true}` |
+
+**Read-only API** (TCP, container-facing):
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/ollama/queue` | View queue state |
+| `GET` | `/ollama/models` | List allowed models |
+| `PUT` | `/ollama/bid` | Set own bid (identified by source IP) |
+| `GET` | `/ollama/bid` | Get own bid |
 
 ## Value formats
 
