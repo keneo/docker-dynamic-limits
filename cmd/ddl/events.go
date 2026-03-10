@@ -70,6 +70,10 @@ Use --sock or DDL_SOCK to connect via unix socket, or --api to connect via TCP.`
 						return (&net.Dialer{}).DialContext(ctx, "unix", defaultSock)
 					}
 					wsURLStr = buildWSURLFrom("ws://localhost", containerFilter, typesFilter)
+				} else if apiURL == "http://localhost" {
+					// Docker exec fallback — WebSocket doesn't work through docker exec,
+					// connect directly to the TCP API at port 7123 instead
+					wsURLStr = buildWSURLFrom("ws://localhost:7123", containerFilter, typesFilter)
 				}
 			}
 
