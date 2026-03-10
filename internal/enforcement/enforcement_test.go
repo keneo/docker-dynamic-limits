@@ -314,6 +314,46 @@ func TestEnforcementEmitsUsageUpdate(t *testing.T) {
 	}
 }
 
+func TestByteSecondSkippedDuringSleep(t *testing.T) {
+	m, ms, md, mc, _, _ := newTestManager()
+
+	dockerID := "abcdef123456789000"
+	containerID := dockerID[:12]
+
+	md.AddContainer(dockerID, "test", true)
+	ms.RegisterContainer(dockerID, "test")
+	ms.SetLimit(containerID, model.LimitRAMUsageBSec, 999_999_999) // high limit so no enforcement
+
+	cgPath := "/cgroup/test"
+	mc.CgroupPaths[dockerID] = cgPath
+	mc.MemCurrent[cgPath] = 1_000_000 // 1 MB
+
+	// Simulate a normal tick (slept=false): should accumulate
+	m.enforced[containerID] = make(map[model.LimitType]bool)
+	m.checkAndEnforce(nil, containerID, dockerID, false)
+
+	usage1, _ := ms.GetUsage(containerID, model.LimitRAMUsageBSec)
+	if usage1 != 1_000_000 {
+		t.Fatalf("after normal tick: usage = %d, want 1000000", usage1)
+	}
+
+	// Simulate a sleep tick (slept=true): should NOT accumulate
+	m.checkAndEnforce(nil, containerID, dockerID, true)
+
+	usage2, _ := ms.GetUsage(containerID, model.LimitRAMUsageBSec)
+	if usage2 != usage1 {
+		t.Errorf("after sleep tick: usage = %d, want %d (unchanged)", usage2, usage1)
+	}
+
+	// Another normal tick: should accumulate again
+	m.checkAndEnforce(nil, containerID, dockerID, false)
+
+	usage3, _ := ms.GetUsage(containerID, model.LimitRAMUsageBSec)
+	if usage3 != 2_000_000 {
+		t.Errorf("after second normal tick: usage = %d, want 2000000", usage3)
+	}
+}
+
 func TestEnforcementEmitsEnforcementChange(t *testing.T) {
 	m, ms, md, mc, _, bus := newTestManager()
 

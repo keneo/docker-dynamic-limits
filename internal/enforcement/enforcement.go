@@ -34,9 +34,10 @@ type Manager struct {
 	bus      *events.Bus
 	interval time.Duration
 
-	mu        sync.Mutex
-	workers   map[string]context.CancelFunc // containerID -> cancel func
-	enforced  map[string]map[model.LimitType]bool
+	mu             sync.Mutex
+	workers        map[string]context.CancelFunc // containerID -> cancel func
+	enforced       map[string]map[model.LimitType]bool
+	lastSleepEmit  time.Time // dedup sleep events across containers
 }
 
 // NewManager creates an enforcement manager.
@@ -115,18 +116,30 @@ func (m *Manager) NotifyLimitChanged(containerID string) {
 func (m *Manager) enforcementLoop(ctx context.Context, containerID, dockerID string) {
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
+	lastTick := time.Now().Round(0) // strip monotonic reading for wall-clock comparison
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.checkAndEnforce(ctx, containerID, dockerID)
+			now := time.Now().Round(0) // strip monotonic reading
+			elapsed := now.Sub(lastTick)
+			lastTick = now
+			slept := elapsed > m.interval*5
+			if slept {
+				log.Printf("[enforcement] sleep detected for %s: gap=%v", containerID, elapsed)
+				m.emitSleepEvent(containerID, elapsed)
+				// Reset the ticker — after VM suspend/resume the internal
+				// monotonic-based timer can get stuck.
+				ticker.Reset(m.interval)
+			}
+			m.checkAndEnforce(ctx, containerID, dockerID, slept)
 		}
 	}
 }
 
-func (m *Manager) checkAndEnforce(ctx context.Context, containerID, dockerID string) {
+func (m *Manager) checkAndEnforce(ctx context.Context, containerID, dockerID string, slept bool) {
 	// Check if container is still running
 	running, err := m.docker.IsContainerRunning(ctx, dockerID)
 	if err != nil || !running {
@@ -156,7 +169,7 @@ func (m *Manager) checkAndEnforce(ctx context.Context, containerID, dockerID str
 			wasEnforced := m.enforced[containerID][lt]
 			m.mu.Unlock()
 
-			if !wasEnforced {
+			if !wasEnforced && !slept {
 				source := m.getByteSecondSource(ctx, containerID, dockerID, lt, limits, cgroupPath, cgroupErr)
 				m.store.AddUsage(containerID, lt, source)
 			}
@@ -458,6 +471,24 @@ func (m *Manager) release(ctx context.Context, containerID, dockerID string, lt 
 			Enforced:  false,
 		})
 	}
+}
+
+// emitSleepEvent publishes a system_sleep event, deduplicating across containers.
+func (m *Manager) emitSleepEvent(containerID string, elapsed time.Duration) {
+	if m.bus == nil {
+		return
+	}
+	m.mu.Lock()
+	if time.Since(m.lastSleepEmit) < m.interval*5 {
+		m.mu.Unlock()
+		return
+	}
+	m.lastSleepEmit = time.Now()
+	m.mu.Unlock()
+
+	m.bus.PublishData(events.SystemSleep, containerID, events.SystemSleepData{
+		DurationSeconds: elapsed.Seconds(),
+	})
 }
 
 // isActuallyEnforced checks the real container state to detect enforcement

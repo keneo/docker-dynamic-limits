@@ -65,6 +65,12 @@ type QueueEntry struct {
 	EnqueuedAt  time.Time `json:"enqueued_at"`
 }
 
+// sleepEvent records a detected system sleep period.
+type sleepEvent struct {
+	at       time.Time
+	duration time.Duration
+}
+
 // Queue manages the Ollama inference queue with bid-based priority.
 type Queue struct {
 	cfg    Config
@@ -77,6 +83,9 @@ type Queue struct {
 	bids    map[string]int64 // containerID → standing bid (milli-cents per wall-second)
 	entries []*entry         // sorted: highest bid first, FIFO for equal bids
 	active  *entry           // currently being processed by Ollama
+
+	sleepMu     sync.Mutex
+	sleepEvents []sleepEvent
 
 	wake chan struct{} // buffered(1), signals processor
 	done chan struct{} // shutdown
@@ -102,6 +111,7 @@ func NewQueue(cfg Config, px proxy.SpendingProxy, st store.DataStore, bus *event
 		done:   make(chan struct{}),
 	}
 	go q.processLoop()
+	go q.sleepDetectorLoop()
 	return q
 }
 
@@ -464,9 +474,15 @@ func (q *Queue) processEntry(e *entry) {
 	req.Body = io.NopCloser(jsonReader(e.body))
 	req.ContentLength = int64(len(e.body))
 
-	start := time.Now()
+	start := time.Now().Round(0) // wall clock only (monotonic clock doesn't advance during sleep)
 	resp, err := q.client.Do(req)
-	wallSeconds := time.Since(start).Seconds()
+	end := time.Now().Round(0)
+	wallSeconds := end.Sub(start).Seconds()
+	sleepDur := q.sleepDuring(start, end)
+	wallSeconds -= sleepDur.Seconds()
+	if wallSeconds < 0 {
+		wallSeconds = 0
+	}
 
 	if err != nil {
 		e.resultCh <- &result{err: fmt.Errorf("ollama request: %w", err)}
@@ -503,6 +519,58 @@ func (q *Queue) processEntry(e *entry) {
 		header:     resp.Header,
 		body:       body,
 	}
+}
+
+func (q *Queue) sleepDetectorLoop() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	last := time.Now().Round(0) // strip monotonic reading for wall-clock comparison
+	for {
+		select {
+		case <-q.done:
+			return
+		case <-ticker.C:
+			now := time.Now().Round(0) // strip monotonic reading
+			elapsed := now.Sub(last)
+			last = now
+			if elapsed > 5*time.Second {
+				q.recordSleep(now, elapsed-time.Second)
+				// Reset the ticker — after VM suspend/resume the internal
+				// monotonic-based timer can get stuck.
+				ticker.Reset(time.Second)
+			}
+		}
+	}
+}
+
+func (q *Queue) recordSleep(at time.Time, duration time.Duration) {
+	q.sleepMu.Lock()
+	defer q.sleepMu.Unlock()
+	q.sleepEvents = append(q.sleepEvents, sleepEvent{at: at, duration: duration})
+}
+
+// sleepDuring returns the total sleep duration overlapping with the [start, end) range.
+func (q *Queue) sleepDuring(start, end time.Time) time.Duration {
+	q.sleepMu.Lock()
+	defer q.sleepMu.Unlock()
+	var total time.Duration
+	for _, se := range q.sleepEvents {
+		sleepStart := se.at.Add(-se.duration)
+		sleepEnd := se.at
+		// Overlap with [start, end)
+		overlapStart := sleepStart
+		if start.After(overlapStart) {
+			overlapStart = start
+		}
+		overlapEnd := sleepEnd
+		if end.Before(overlapEnd) {
+			overlapEnd = end
+		}
+		if overlapEnd.After(overlapStart) {
+			total += overlapEnd.Sub(overlapStart)
+		}
+	}
+	return total
 }
 
 func (q *Queue) removeEntry(target *entry) {

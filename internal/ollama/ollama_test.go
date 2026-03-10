@@ -637,6 +637,63 @@ func TestGeneratePath(t *testing.T) {
 	}
 }
 
+func TestOllamaBillingSleepSubtraction(t *testing.T) {
+	ollama := newMockOllama(100*time.Millisecond, map[string]interface{}{"model": "llama3.2:3b"})
+	defer ollama.Close()
+
+	q, mp, _, _ := newTestQueue(ollama.URL)
+	defer q.Stop()
+
+	q.SetBid("c1", 1000) // 1000 milli-cents per wall-second
+
+	// Inject a fake sleep event with a wide window that will definitely
+	// overlap the request processing time. Sleep range = [now, now+1s].
+	// The request takes ~100ms, so the entire request falls within the sleep.
+	now := time.Now()
+	q.recordSleep(now.Add(1*time.Second), 1*time.Second)
+
+	w := makeRequest(t, q, "c1", "llama3.2:3b", "/api/chat")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	// The entire ~100ms request falls within the 1s sleep window,
+	// so wallSeconds should be reduced to ~0 and cost should be 0.
+	spent := mp.GetSpending("c1")
+	if spent != 0 {
+		t.Errorf("spending = %d, want 0 (entire request during sleep)", spent)
+	}
+}
+
+func TestSleepDuring(t *testing.T) {
+	q, _, _, _ := newTestQueue("http://localhost:11434")
+	defer q.Stop()
+
+	base := time.Now()
+
+	// Record a sleep event: at base+10s, duration 5s (so sleep was from base+5s to base+10s)
+	q.recordSleep(base.Add(10*time.Second), 5*time.Second)
+
+	// Query overlapping range
+	dur := q.sleepDuring(base.Add(7*time.Second), base.Add(12*time.Second))
+	// Sleep is [base+5s, base+10s], query is [base+7s, base+12s] → overlap is [base+7s, base+10s] = 3s
+	if dur != 3*time.Second {
+		t.Errorf("sleepDuring = %v, want 3s", dur)
+	}
+
+	// Query non-overlapping range
+	dur = q.sleepDuring(base.Add(11*time.Second), base.Add(15*time.Second))
+	if dur != 0 {
+		t.Errorf("sleepDuring = %v, want 0", dur)
+	}
+
+	// Query fully containing the sleep
+	dur = q.sleepDuring(base, base.Add(20*time.Second))
+	if dur != 5*time.Second {
+		t.Errorf("sleepDuring = %v, want 5s", dur)
+	}
+}
+
 func TestDefaultBid(t *testing.T) {
 	ollama := newMockOllama(50*time.Millisecond, map[string]interface{}{"model": "llama3.2:3b"})
 	defer ollama.Close()

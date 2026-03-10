@@ -215,6 +215,13 @@ Use --sock or DDL_SOCK to connect via unix socket, or --api to connect via TCP.`
 					if json.Unmarshal(evt.Data, &d) == nil {
 						fmt.Printf("  bid=%d milli-cents/wall-sec\n", d.Bid)
 					}
+				case "system_sleep":
+					var d struct {
+						DurationSeconds float64 `json:"duration_seconds"`
+					}
+					if json.Unmarshal(evt.Data, &d) == nil {
+						fmt.Printf("  duration=%.1fs\n", d.DurationSeconds)
+					}
 				}
 				fmt.Println()
 			}
