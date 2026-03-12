@@ -8,6 +8,7 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/keneo/docker-dynamic-limits/internal/cgroup"
 	"github.com/keneo/docker-dynamic-limits/internal/model"
+	"github.com/keneo/docker-dynamic-limits/internal/proxy"
 )
 
 // --- MockStore ---
@@ -614,6 +615,7 @@ type MockProxy struct {
 	Spending map[string]int64
 	Budgets  map[string]int64
 	Addrs    map[string]string
+	Activity map[string][]proxy.ProxyActivity
 }
 
 func NewMockProxy() *MockProxy {
@@ -621,6 +623,7 @@ func NewMockProxy() *MockProxy {
 		Spending: make(map[string]int64),
 		Budgets:  make(map[string]int64),
 		Addrs:    make(map[string]string),
+		Activity: make(map[string][]proxy.ProxyActivity),
 	}
 }
 
@@ -671,4 +674,16 @@ func (p *MockProxy) AddSpending(containerID string, milliCents int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.Spending[containerID] += milliCents
+}
+
+func (p *MockProxy) GetActivity(containerID string) []proxy.ProxyActivity {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]proxy.ProxyActivity{}, p.Activity[containerID]...)
+}
+
+func (p *MockProxy) RecordActivity(containerID string, a proxy.ProxyActivity) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.Activity[containerID] = append(p.Activity[containerID], a)
 }

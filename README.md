@@ -292,6 +292,7 @@ The daemon exposes two interfaces:
 | `GET` | `/containers/{id}/limits` | Get all limits |
 | `PUT` | `/containers/{id}/limits` | Set/increase/decrease a limit |
 | `GET` | `/containers/{id}/usage` | Get current usage |
+| `GET` | `/containers/{id}/activity` | Get recent proxy activity (last 20 requests) |
 | `POST` | `/containers/{id}/clone` | Clone container with limits |
 | `GET` | `/usage` | In-container usage self-query |
 | `GET` | `/limits` | In-container limits self-query |

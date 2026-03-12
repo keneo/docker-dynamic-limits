@@ -451,3 +451,74 @@ dialog label select {
     from { opacity: 0; transform: translateY(10px); }
     to { opacity: 1; transform: translateY(0); }
 }
+
+/* --- Proxy Activity --- */
+#detail-activity {
+    margin-top: 1rem;
+    border-top: 1px solid var(--border);
+    padding-top: 0.5rem;
+}
+
+#detail-activity::before {
+    content: 'Recent Proxy Activity';
+    font-weight: 600;
+    font-size: 0.9rem;
+    display: block;
+    margin-bottom: 0.5rem;
+}
+
+.activity-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+}
+
+.activity-table th {
+    text-align: left;
+    padding: 4px 6px;
+    border-bottom: 2px solid var(--border);
+    font-weight: 600;
+}
+
+.activity-table td {
+    padding: 4px 6px;
+    border-bottom: 1px solid var(--border);
+}
+
+.activity-row {
+    cursor: pointer;
+}
+
+.activity-row:hover {
+    background: var(--bg-secondary);
+}
+
+.activity-error {
+    color: var(--danger);
+}
+
+.activity-warn {
+    color: var(--warning);
+}
+
+.activity-bodies {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+}
+
+.activity-body {
+    background: var(--bg-secondary);
+    padding: 0.5rem;
+    border-radius: 4px;
+    max-height: 300px;
+    overflow: auto;
+    font-size: 0.75rem;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin: 0.25rem 0 0 0;
+}
+
+.activity-body-row td {
+    padding: 0.5rem;
+}

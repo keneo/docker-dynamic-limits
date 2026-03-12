@@ -44,6 +44,15 @@ API: `GET /config` returns all config (keys masked), `PUT /config` accepts parti
 
 **Disabled providers**: When a provider (Anthropic, OpenAI, Ollama) is disabled via config, requests from containers to that provider are blocked with HTTP 403 `{"error":"provider disabled in ddl proxy"}`. The check happens early in `proxyHandler` via `isDisabledProvider()` before any forwarding.
 
+## Proxy Activity
+
+Per-container proxy activity is recorded in an in-memory ring buffer (last 20 entries per container) in `SpendingTracker`. Activity is recorded for:
+- Cloud API calls (Anthropic/OpenAI) — including request/response bodies (truncated to 4KB), model, tokens, cost, duration
+- Ollama requests — via `ActivityRecorder` callback from `ollama.Queue.processEntry()`
+- Blocked requests (403 disabled provider, 429 budget exceeded) — with error message
+
+API: `GET /containers/{id}/activity` returns `[]ProxyActivity`. Activity is also included in `GET /containers/{id}` response. The dashboard shows a "Recent Proxy Activity" table in the container detail panel with expandable rows for request/response bodies.
+
 ## System Sleep Handling
 
 When the host Mac sleeps (lid close), Docker Desktop's Linux VM suspends. The daemon detects this via wall-clock time gaps between enforcement ticks and takes corrective action:

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 // SpendingProxy defines the interface for spending tracking operations.
@@ -20,6 +22,8 @@ type SpendingProxy interface {
 	SetSpending(containerID string, cents int64)
 	GetProxyAddr(containerID string) string
 	AddSpending(containerID string, milliCents int64)
+	GetActivity(containerID string) []ProxyActivity
+	RecordActivity(containerID string, a ProxyActivity)
 }
 
 // OllamaHandler is the interface the proxy uses to dispatch Ollama requests.
@@ -51,6 +55,8 @@ type SpendingTracker struct {
 	enabledHosts map[string]bool
 	// ollamaQueue handles Ollama inference requests (nil when Ollama not configured)
 	ollamaQueue OllamaHandler
+	// activity stores recent proxy requests per container
+	activity map[string][]ProxyActivity
 }
 
 // ModelPricing holds per-token costs in micro-cents.
@@ -58,6 +64,28 @@ type ModelPricing struct {
 	InputPerToken  int64 `json:"input_per_token"`
 	OutputPerToken int64 `json:"output_per_token"`
 }
+
+// ProxyActivity records a single proxied request.
+type ProxyActivity struct {
+	Timestamp    time.Time `json:"timestamp"`
+	Host         string    `json:"host"`
+	Path         string    `json:"path"`
+	Method       string    `json:"method"`
+	RequestBody  string    `json:"request_body"`
+	StatusCode   int       `json:"status_code"`
+	ResponseBody string    `json:"response_body"`
+	Model        string    `json:"model"`
+	InputTokens  int64     `json:"input_tokens"`
+	OutputTokens int64     `json:"output_tokens"`
+	CostMicro    int64     `json:"cost_micro"`
+	DurationMs   int64     `json:"duration_ms"`
+	Error        string    `json:"error,omitempty"`
+}
+
+const (
+	maxActivityPerContainer = 20
+	maxBodySize             = 4096
+)
 
 // NewSpendingTracker creates a new spending tracker.
 func NewSpendingTracker(onUpdate func(containerID string, totalCents int64)) *SpendingTracker {
@@ -70,6 +98,7 @@ func NewSpendingTracker(onUpdate func(containerID string, totalCents int64)) *Sp
 		apiKeys:          make(map[string]string),
 		onSpendingUpdate: onUpdate,
 		enabledHosts:     make(map[string]bool),
+		activity:         make(map[string][]ProxyActivity),
 	}
 }
 
@@ -215,6 +244,36 @@ func (st *SpendingTracker) GetEnabledHosts() map[string]bool {
 	return result
 }
 
+// RecordActivity appends a proxy activity entry for a container.
+func (st *SpendingTracker) RecordActivity(containerID string, a ProxyActivity) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	entries := st.activity[containerID]
+	entries = append(entries, a)
+	if len(entries) > maxActivityPerContainer {
+		entries = entries[len(entries)-maxActivityPerContainer:]
+	}
+	st.activity[containerID] = entries
+}
+
+// GetActivity returns recent proxy activity for a container (most recent last).
+func (st *SpendingTracker) GetActivity(containerID string) []ProxyActivity {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	entries := st.activity[containerID]
+	result := make([]ProxyActivity, len(entries))
+	copy(result, entries)
+	return result
+}
+
+// truncateBody truncates a byte slice to maxBodySize and returns it as a string.
+func truncateBody(b []byte) string {
+	if len(b) <= maxBodySize {
+		return string(b)
+	}
+	return string(b[:maxBodySize]) + "..."
+}
+
 func (st *SpendingTracker) isOllamaHost(host string) bool {
 	st.mu.RLock()
 	defer st.mu.RUnlock()
@@ -246,6 +305,14 @@ func (st *SpendingTracker) proxyHandler(containerID string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Block requests to disabled providers
 		if st.isDisabledProvider(r.Host) {
+			st.RecordActivity(containerID, ProxyActivity{
+				Timestamp:  time.Now(),
+				Host:       stripPort(r.Host),
+				Path:       r.URL.Path,
+				Method:     r.Method,
+				StatusCode: http.StatusForbidden,
+				Error:      "provider disabled in ddl proxy",
+			})
 			http.Error(w, `{"error":"provider disabled in ddl proxy"}`, http.StatusForbidden)
 			return
 		}
@@ -270,8 +337,23 @@ func (st *SpendingTracker) proxyHandler(containerID string) http.Handler {
 		isAPICall := st.isTrackedAPI(r.Host)
 
 		if isAPICall && budget > 0 && spent >= budget {
+			st.RecordActivity(containerID, ProxyActivity{
+				Timestamp:  time.Now(),
+				Host:       stripPort(r.Host),
+				Path:       r.URL.Path,
+				Method:     r.Method,
+				StatusCode: http.StatusTooManyRequests,
+				Error:      "spending budget exceeded",
+			})
 			http.Error(w, `{"error":"spending budget exceeded"}`, http.StatusTooManyRequests)
 			return
+		}
+
+		// Buffer request body for tracked API calls (needed for activity recording)
+		var reqBody []byte
+		if isAPICall && r.Body != nil {
+			reqBody, _ = io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(reqBody))
 		}
 
 		// Forward the request
@@ -324,12 +406,14 @@ func (st *SpendingTracker) proxyHandler(containerID string) http.Handler {
 		if transport == nil {
 			transport = http.DefaultTransport
 		}
+		start := time.Now()
 		resp, err := transport.RoundTrip(outReq)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 		defer resp.Body.Close()
+		durationMs := time.Since(start).Milliseconds()
 
 		// If it's a tracked API, read the body to extract usage
 		var body []byte
@@ -339,7 +423,8 @@ func (st *SpendingTracker) proxyHandler(containerID string) http.Handler {
 				http.Error(w, err.Error(), http.StatusBadGateway)
 				return
 			}
-			st.trackSpending(containerID, r.Host, body)
+			act := st.trackSpendingWithActivity(containerID, r.Host, r.URL.Path, r.Method, reqBody, body, resp.StatusCode, durationMs)
+			st.RecordActivity(containerID, act)
 		}
 
 		// Copy response headers
@@ -397,17 +482,36 @@ type apiUsage struct {
 	Model string `json:"model"`
 }
 
-func (st *SpendingTracker) trackSpending(containerID string, host string, body []byte) {
+// trackSpending is a convenience wrapper for tests that don't need activity data.
+func (st *SpendingTracker) trackSpending(containerID string, host string, respBody []byte) {
+	st.trackSpendingWithActivity(containerID, host, "", "", nil, respBody, 0, 0)
+}
+
+func (st *SpendingTracker) trackSpendingWithActivity(containerID string, host string, path string, method string, reqBody []byte, respBody []byte, statusCode int, durationMs int64) ProxyActivity {
+	act := ProxyActivity{
+		Timestamp:    time.Now(),
+		Host:         stripPort(host),
+		Path:         path,
+		Method:       method,
+		RequestBody:  truncateBody(reqBody),
+		StatusCode:   statusCode,
+		ResponseBody: truncateBody(respBody),
+		DurationMs:   durationMs,
+	}
+
 	var resp apiUsage
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return act
 	}
 
 	inputTokens := resp.Usage.PromptTokens + resp.Usage.InputTokens
 	outputTokens := resp.Usage.CompletionTokens + resp.Usage.OutputTokens
+	act.Model = resp.Model
+	act.InputTokens = inputTokens
+	act.OutputTokens = outputTokens
 
 	if inputTokens == 0 && outputTokens == 0 {
-		return
+		return act
 	}
 
 	// Find pricing for this model
@@ -416,11 +520,11 @@ func (st *SpendingTracker) trackSpending(containerID string, host string, body [
 	pricing, ok := st.prices[modelName]
 	st.mu.RUnlock()
 	if !ok {
-		// Use a conservative default
 		pricing = ModelPricing{InputPerToken: 1000, OutputPerToken: 3000}
 	}
 
 	costMicroCents := CalculateSpendingMicroCents(inputTokens, outputTokens, pricing)
+	act.CostMicro = costMicroCents
 
 	st.mu.Lock()
 	st.spending[containerID] += costMicroCents
@@ -428,11 +532,13 @@ func (st *SpendingTracker) trackSpending(containerID string, host string, body [
 	st.mu.Unlock()
 
 	if st.onSpendingUpdate != nil {
-		st.onSpendingUpdate(containerID, newTotal/1_000) // callback receives milli-cents
+		st.onSpendingUpdate(containerID, newTotal/1_000)
 	}
 
 	log.Printf("[proxy] container %s: %d input + %d output tokens (%s) = %d micro-cents (total: %d milli-cents)",
 		containerID, inputTokens, outputTokens, resp.Model, costMicroCents, newTotal/1_000)
+
+	return act
 }
 
 // CalculateSpendingMicroCents calculates the cost in micro-cents from token counts and pricing.

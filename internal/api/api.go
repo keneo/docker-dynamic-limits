@@ -315,6 +315,8 @@ func (s *Server) handleContainer(w http.ResponseWriter, r *http.Request) {
 		s.handleOllamaBidForContainer(w, r, containerID)
 	case sub == "ollama/queue":
 		s.handleOllamaCancelForContainer(w, r, containerID)
+	case sub == "activity":
+		s.handleActivity(w, r, containerID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -348,7 +350,20 @@ func (s *Server) handleContainerInfo(w http.ResponseWriter, r *http.Request, con
 		return
 	}
 	status := s.buildStatus(*c)
-	writeJSON(w, status)
+	// Include proxy activity in the response
+	var activity []proxy.ProxyActivity
+	if s.proxy != nil {
+		activity = s.proxy.GetActivity(containerID)
+	}
+	writeJSON(w, map[string]interface{}{
+		"container": status.Container,
+		"limits":    status.Limits,
+		"usage":     status.Usage,
+		"enforced":  status.Enforced,
+		"state":     status.State,
+		"proxy_addr": status.ProxyAddr,
+		"activity":  activity,
+	})
 }
 
 func (s *Server) handleLimits(w http.ResponseWriter, r *http.Request, containerID string) {
@@ -675,6 +690,21 @@ func (s *Server) resolveContainerFromRequest(r *http.Request) string {
 		}
 	}
 	return ""
+}
+
+func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request, containerID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var activity []proxy.ProxyActivity
+	if s.proxy != nil {
+		activity = s.proxy.GetActivity(containerID)
+	}
+	if activity == nil {
+		activity = []proxy.ProxyActivity{}
+	}
+	writeJSON(w, activity)
 }
 
 func (s *Server) buildStatus(c model.Container) model.ContainerStatus {

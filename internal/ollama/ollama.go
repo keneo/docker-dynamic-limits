@@ -72,6 +72,9 @@ type sleepEvent struct {
 }
 
 // Queue manages the Ollama inference queue with bid-based priority.
+// ActivityRecorder is called after each Ollama request to record proxy activity.
+type ActivityRecorder func(containerID string, act proxy.ProxyActivity)
+
 type Queue struct {
 	cfg    Config
 	proxy  proxy.SpendingProxy
@@ -86,6 +89,8 @@ type Queue struct {
 
 	sleepMu     sync.Mutex
 	sleepEvents []sleepEvent
+
+	onActivity ActivityRecorder // optional callback for proxy activity recording
 
 	wake chan struct{} // buffered(1), signals processor
 	done chan struct{} // shutdown
@@ -452,6 +457,13 @@ func (q *Queue) SetDefaultBid(bid int64) {
 	q.cfg.DefaultBid = bid
 }
 
+// SetActivityRecorder sets a callback that is called after each Ollama request.
+func (q *Queue) SetActivityRecorder(fn ActivityRecorder) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.onActivity = fn
+}
+
 // SetOllamaURL updates the Ollama server URL at runtime.
 func (q *Queue) SetOllamaURL(u string) {
 	q.mu.Lock()
@@ -562,6 +574,33 @@ func (q *Queue) processEntry(e *entry) {
 
 	log.Printf("[ollama] container %s: %s completed in %.1fs, cost=%d milli-cents (bid=%d)",
 		e.containerID, e.model, wallSeconds, costMilliCents, e.bid)
+
+	// Record activity
+	q.mu.Lock()
+	recorder := q.onActivity
+	q.mu.Unlock()
+	if recorder != nil {
+		reqBody := string(e.body)
+		if len(reqBody) > 4096 {
+			reqBody = reqBody[:4096] + "..."
+		}
+		respBody := string(body)
+		if len(respBody) > 4096 {
+			respBody = respBody[:4096] + "..."
+		}
+		recorder(e.containerID, proxy.ProxyActivity{
+			Timestamp:    end,
+			Host:         "ollama",
+			Path:         e.path,
+			Method:       "POST",
+			RequestBody:  reqBody,
+			StatusCode:   resp.StatusCode,
+			ResponseBody: respBody,
+			Model:        e.model,
+			CostMicro:    costMilliCents * 1_000, // milli-cents → micro-cents
+			DurationMs:   int64(wallSeconds * 1000),
+		})
+	}
 
 	e.resultCh <- &result{
 		statusCode: resp.StatusCode,

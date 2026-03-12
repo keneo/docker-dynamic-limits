@@ -122,6 +122,9 @@ func main() {
 			DefaultBid:     int64(parseIntOr(os.Getenv("DDL_OLLAMA_DEFAULT_BID"), 0)),
 		}
 		oq = ollama.NewQueue(cfg, px, st, bus)
+		oq.SetActivityRecorder(func(containerID string, act proxy.ProxyActivity) {
+			px.RecordActivity(containerID, act)
+		})
 		px.SetOllamaHandler(oq)
 		px.EnableHost("ollama", true)
 		defer oq.Stop()
