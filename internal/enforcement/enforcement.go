@@ -23,6 +23,9 @@ type EnforcementController interface {
 	IsEnforced(containerID string, lt model.LimitType) bool
 	GetEnforced(containerID string) map[model.LimitType]bool
 	NotifyLimitChanged(containerID string)
+	StartGlobalEnforcement()
+	IsGlobalEnforced(lt model.LimitType) bool
+	GetGlobalEnforced() map[model.LimitType]bool
 }
 
 // Manager manages enforcement goroutines for all registered containers.
@@ -37,20 +40,23 @@ type Manager struct {
 	mu             sync.Mutex
 	workers        map[string]context.CancelFunc // containerID -> cancel func
 	enforced       map[string]map[model.LimitType]bool
+	globalEnforced map[model.LimitType]bool
+	globalCancel   context.CancelFunc
 	lastSleepEmit  time.Time // dedup sleep events across containers
 }
 
 // NewManager creates an enforcement manager.
 func NewManager(st store.DataStore, dc docker.DockerClient, cg cgroup.CgroupReader, px proxy.SpendingProxy, bus *events.Bus) *Manager {
 	return &Manager{
-		store:    st,
-		docker:   dc,
-		cgroup:   cg,
-		proxy:    px,
-		bus:      bus,
-		interval: time.Second,
-		workers:  make(map[string]context.CancelFunc),
-		enforced: make(map[string]map[model.LimitType]bool),
+		store:          st,
+		docker:         dc,
+		cgroup:         cg,
+		proxy:          px,
+		bus:            bus,
+		interval:       time.Second,
+		workers:        make(map[string]context.CancelFunc),
+		enforced:       make(map[string]map[model.LimitType]bool),
+		globalEnforced: make(map[model.LimitType]bool),
 	}
 }
 
@@ -503,7 +509,8 @@ func (m *Manager) isActuallyEnforced(ctx context.Context, dockerID string, lt mo
 	}
 }
 
-// isOtherPauseActive checks if another limit type that uses pause is also enforced.
+// isOtherPauseActive checks if another limit type that uses pause is also enforced,
+// including global enforcement.
 func (m *Manager) isOtherPauseActive(containerID string, except model.LimitType) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -513,7 +520,157 @@ func (m *Manager) isOtherPauseActive(containerID string, except model.LimitType)
 			return true
 		}
 	}
+	// Also check global enforcement
+	for _, lt := range pauseTypes {
+		if lt != except && m.globalEnforced[lt] {
+			return true
+		}
+	}
 	return false
+}
+
+// StartGlobalEnforcement spawns a goroutine that enforces global limits.
+func (m *Manager) StartGlobalEnforcement() {
+	m.mu.Lock()
+	if m.globalCancel != nil {
+		m.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.globalCancel = cancel
+	m.mu.Unlock()
+
+	go m.globalEnforcementLoop(ctx)
+	log.Println("[enforcement] started global enforcement")
+}
+
+// IsGlobalEnforced returns whether a specific limit type is globally enforced.
+func (m *Manager) IsGlobalEnforced(lt model.LimitType) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.globalEnforced[lt]
+}
+
+// GetGlobalEnforced returns all global enforcement states.
+func (m *Manager) GetGlobalEnforced() map[model.LimitType]bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make(map[model.LimitType]bool)
+	for k, v := range m.globalEnforced {
+		result[k] = v
+	}
+	return result
+}
+
+func (m *Manager) globalEnforcementLoop(ctx context.Context) {
+	ticker := time.NewTicker(m.interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.checkGlobalEnforcement(ctx)
+		}
+	}
+}
+
+func (m *Manager) checkGlobalEnforcement(ctx context.Context) {
+	globalLimits, err := m.store.GetAllGlobalLimits()
+	if err != nil {
+		log.Printf("[enforcement] error getting global limits: %v", err)
+		return
+	}
+	if len(globalLimits) == 0 {
+		return
+	}
+
+	containers, err := m.store.ListContainers()
+	if err != nil {
+		log.Printf("[enforcement] error listing containers for global enforcement: %v", err)
+		return
+	}
+
+	// Sum usage across all containers for each limit type
+	totalUsage := make(map[model.LimitType]int64)
+	for _, c := range containers {
+		allUsage, err := m.store.GetAllUsage(c.ID)
+		if err != nil {
+			continue
+		}
+		for lt, v := range allUsage {
+			totalUsage[lt] += v
+		}
+	}
+
+	for lt, limit := range globalLimits {
+		if limit == 0 {
+			continue
+		}
+
+		usage := totalUsage[lt]
+		exceeded := usage >= limit
+
+		m.mu.Lock()
+		wasEnforced := m.globalEnforced[lt]
+		m.mu.Unlock()
+
+		if exceeded && !wasEnforced {
+			m.globalEnforce(ctx, lt, containers)
+		} else if !exceeded && wasEnforced {
+			m.globalRelease(ctx, lt, containers)
+		}
+	}
+}
+
+func (m *Manager) globalEnforce(ctx context.Context, lt model.LimitType, containers []model.Container) {
+	log.Printf("[enforcement] global limit %s exceeded, enforcing on all containers", lt)
+
+	for _, c := range containers {
+		running, err := m.docker.IsContainerRunning(ctx, c.DockerID)
+		if err != nil || !running {
+			continue
+		}
+		cgroupPath, _ := m.cgroup.FindCgroupPath(c.DockerID)
+		m.enforce(ctx, c.ID, c.DockerID, lt, cgroupPath)
+	}
+
+	m.mu.Lock()
+	m.globalEnforced[lt] = true
+	m.mu.Unlock()
+
+	if m.bus != nil {
+		m.bus.PublishData(events.GlobalEnforcementChange, "", events.GlobalEnforcementChangeData{
+			LimitType: string(lt),
+			Enforced:  true,
+		})
+	}
+}
+
+func (m *Manager) globalRelease(ctx context.Context, lt model.LimitType, containers []model.Container) {
+	log.Printf("[enforcement] global limit %s released, releasing all containers", lt)
+
+	// Clear global enforced first so isOtherPauseActive sees updated state
+	m.mu.Lock()
+	m.globalEnforced[lt] = false
+	m.mu.Unlock()
+
+	for _, c := range containers {
+		running, err := m.docker.IsContainerRunning(ctx, c.DockerID)
+		if err != nil || !running {
+			continue
+		}
+		cgroupPath, _ := m.cgroup.FindCgroupPath(c.DockerID)
+		m.release(ctx, c.ID, c.DockerID, lt, cgroupPath)
+	}
+
+	if m.bus != nil {
+		m.bus.PublishData(events.GlobalEnforcementChange, "", events.GlobalEnforcementChangeData{
+			LimitType: string(lt),
+			Enforced:  false,
+		})
+	}
 }
 
 // StartAll begins enforcement for all registered containers.
@@ -528,12 +685,16 @@ func (m *Manager) StartAll() error {
 	return nil
 }
 
-// StopAll stops enforcement for all containers.
+// StopAll stops enforcement for all containers and global enforcement.
 func (m *Manager) StopAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for id, cancel := range m.workers {
 		cancel()
 		delete(m.workers, id)
+	}
+	if m.globalCancel != nil {
+		m.globalCancel()
+		m.globalCancel = nil
 	}
 }

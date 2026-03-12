@@ -354,6 +354,128 @@ func TestByteSecondSkippedDuringSleep(t *testing.T) {
 	}
 }
 
+func TestGlobalEnforcementPausesAllContainers(t *testing.T) {
+	m, ms, md, mc, _, _ := newTestManager()
+
+	dockerID1 := "aaaaaaaaaaaa000000"
+	dockerID2 := "bbbbbbbbbbbb000000"
+	containerID1 := dockerID1[:12]
+	containerID2 := dockerID2[:12]
+
+	md.AddContainer(dockerID1, "c1", true)
+	md.AddContainer(dockerID2, "c2", true)
+	ms.RegisterContainer(dockerID1, "c1")
+	ms.RegisterContainer(dockerID2, "c2")
+
+	cgPath1 := "/cgroup/c1"
+	cgPath2 := "/cgroup/c2"
+	mc.CgroupPaths[dockerID1] = cgPath1
+	mc.CgroupPaths[dockerID2] = cgPath2
+
+	// Store usage directly (global enforcement reads from store)
+	ms.SetUsage(containerID1, model.LimitCPU, 60)
+	ms.SetUsage(containerID2, model.LimitCPU, 50)
+
+	// Set global CPU limit at 100s (total usage 110s exceeds it)
+	ms.SetGlobalLimit(model.LimitCPU, 100)
+
+	m.checkGlobalEnforcement(nil)
+
+	// Both containers should be paused
+	paused1, _ := md.IsContainerPaused(nil, dockerID1)
+	paused2, _ := md.IsContainerPaused(nil, dockerID2)
+	if !paused1 {
+		t.Error("container c1 should be paused when global CPU limit exceeded")
+	}
+	if !paused2 {
+		t.Error("container c2 should be paused when global CPU limit exceeded")
+	}
+
+	if !m.IsGlobalEnforced(model.LimitCPU) {
+		t.Error("global CPU should be marked as enforced")
+	}
+}
+
+func TestGlobalEnforcementNoLimitNoAction(t *testing.T) {
+	m, ms, md, mc, _, _ := newTestManager()
+
+	dockerID := "aaaaaaaaaaaa000000"
+	containerID := dockerID[:12]
+
+	md.AddContainer(dockerID, "c1", true)
+	ms.RegisterContainer(dockerID, "c1")
+
+	cgPath := "/cgroup/c1"
+	mc.CgroupPaths[dockerID] = cgPath
+	mc.CPUUsage[cgPath] = 999_000_000
+
+	m.enforced[containerID] = make(map[model.LimitType]bool)
+	m.checkAndEnforce(nil, containerID, dockerID, false)
+
+	// No global limits set
+	m.checkGlobalEnforcement(nil)
+
+	paused, _ := md.IsContainerPaused(nil, dockerID)
+	if paused {
+		t.Error("container should not be paused when no global limits set")
+	}
+}
+
+func TestGlobalEnforcementReleasesWhenLimitIncreased(t *testing.T) {
+	m, ms, md, mc, _, _ := newTestManager()
+
+	dockerID := "aaaaaaaaaaaa000000"
+	containerID := dockerID[:12]
+
+	md.AddContainer(dockerID, "c1", true)
+	ms.RegisterContainer(dockerID, "c1")
+
+	cgPath := "/cgroup/c1"
+	mc.CgroupPaths[dockerID] = cgPath
+
+	// Store usage directly
+	ms.SetUsage(containerID, model.LimitCPU, 200)
+
+	// Set global limit at 100s (exceeded)
+	ms.SetGlobalLimit(model.LimitCPU, 100)
+	m.checkGlobalEnforcement(nil)
+
+	paused, _ := md.IsContainerPaused(nil, dockerID)
+	if !paused {
+		t.Fatal("container should be paused when global limit exceeded")
+	}
+
+	// Increase global limit to 300s (no longer exceeded)
+	ms.SetGlobalLimit(model.LimitCPU, 300)
+	m.checkGlobalEnforcement(nil)
+
+	paused, _ = md.IsContainerPaused(nil, dockerID)
+	if paused {
+		t.Error("container should be unpaused after global limit increased above usage")
+	}
+
+	if m.IsGlobalEnforced(model.LimitCPU) {
+		t.Error("global CPU should not be marked as enforced after release")
+	}
+}
+
+func TestIsOtherPauseActiveIncludesGlobal(t *testing.T) {
+	m, _, _, _, _, _ := newTestManager()
+
+	m.enforced["c1"] = map[model.LimitType]bool{}
+	m.globalEnforced[model.LimitCPU] = true
+
+	// From disk's perspective, global CPU enforcement should count
+	if !m.isOtherPauseActive("c1", model.LimitDisk) {
+		t.Error("should detect global CPU enforcement as active when checking from Disk")
+	}
+
+	// From CPU's perspective, global CPU should not count itself
+	if m.isOtherPauseActive("c1", model.LimitCPU) {
+		t.Error("should not count same limit type as other pause")
+	}
+}
+
 func TestEnforcementEmitsEnforcementChange(t *testing.T) {
 	m, ms, md, mc, _, bus := newTestManager()
 

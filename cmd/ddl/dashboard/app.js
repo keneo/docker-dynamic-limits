@@ -3,6 +3,9 @@
 
     // --- State ---
     let containers = [];
+    let globalLimits = {};
+    let globalUsage = {};
+    let globalEnforced = {};
     let selectedID = null;
     let refreshTimer = null;
 
@@ -285,13 +288,24 @@
     // --- Data fetching ---
     function refresh() {
         api('GET', '/containers').then(function (data) {
-            containers = data || [];
+            if (data && data.containers) {
+                containers = data.containers || [];
+                globalLimits = data.global_limits || {};
+                globalUsage = data.global_usage || {};
+                globalEnforced = data.global_enforced || {};
+            } else {
+                containers = data || [];
+                globalLimits = {};
+                globalUsage = {};
+                globalEnforced = {};
+            }
             offlineBanner.hidden = true;
             statusIndicator.className = 'status connected';
             statusIndicator.title = 'Connected';
             lastRefreshEl.textContent = new Date().toLocaleTimeString();
             renderContainers();
             renderDetail();
+            renderGlobalLimits();
         }).catch(function (err) {
             offlineBanner.hidden = false;
             statusIndicator.className = 'status disconnected';
@@ -417,6 +431,83 @@
         } else {
             refresh();
             startAutoRefresh();
+        }
+    });
+
+    // --- Global Limits ---
+    var globalPanel = document.getElementById('global-panel');
+    var globalLimitsEl = document.getElementById('global-limits');
+
+    function renderGlobalLimits() {
+        var hasAnyLimit = false;
+        for (var k in globalLimits) {
+            if (globalLimits[k] > 0) { hasAnyLimit = true; break; }
+        }
+        globalPanel.hidden = !hasAnyLimit;
+        if (!hasAnyLimit) return;
+
+        var html = '';
+        LIMIT_TYPES.forEach(function (type) {
+            var limit = (globalLimits && globalLimits[type]) || 0;
+            if (limit === 0) return;
+            var usage = (globalUsage && globalUsage[type]) || 0;
+            var enforced = globalEnforced && globalEnforced[type];
+            var pct = limit > 0 ? Math.min(100, (usage / limit) * 100) : 0;
+
+            html +=
+                '<div class="limit-row">' +
+                    '<span class="limit-type">' + esc(LIMIT_LABELS[type]) + '</span>' +
+                    '<span>' + formatValue(type, usage) + '</span>' +
+                    '<span>' + formatValue(type, limit) + '</span>' +
+                    '<span class="limit-pct">' + (limit > 0 ? pct.toFixed(0) + '%' : '-') + '</span>' +
+                    '<div class="progress-bar"><div class="progress-fill' + (enforced ? ' enforced' : '') + '" style="width:' + pct + '%"></div></div>' +
+                    '<div class="limit-actions">' +
+                        '<button class="btn btn-sm" data-global-type="' + type + '" data-global-op="set">Set</button>' +
+                        '<button class="btn btn-sm" data-global-type="' + type + '" data-global-op="increase">+</button>' +
+                        '<button class="btn btn-sm" data-global-type="' + type + '" data-global-op="decrease">-</button>' +
+                    '</div>' +
+                '</div>';
+        });
+        globalLimitsEl.innerHTML = html;
+
+        globalLimitsEl.querySelectorAll('[data-global-op]').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                openGlobalLimitDialog(btn.dataset.globalType, btn.dataset.globalOp);
+            });
+        });
+    }
+
+    function openGlobalLimitDialog(type, operation) {
+        document.getElementById('global-limit-type').value = type;
+        document.getElementById('global-limit-value').value = '';
+        document.getElementById('global-limit-operation').value = operation;
+        document.getElementById('global-limit-dialog').showModal();
+    }
+
+    document.getElementById('global-limit-dialog').addEventListener('close', function () {
+        var dialog = this;
+        if (dialog.returnValue !== 'cancel') {
+            var type = document.getElementById('global-limit-type').value;
+            var operation = document.getElementById('global-limit-operation').value;
+            var rawValue = document.getElementById('global-limit-value').value.trim();
+            if (!rawValue) return;
+
+            var value = parseValue(type, rawValue);
+            if (isNaN(value)) {
+                toast('Invalid value: ' + rawValue, true);
+                return;
+            }
+
+            api('PUT', '/global-limits', {
+                type: type,
+                value: value,
+                operation: operation
+            }).then(function () {
+                toast('Global limit ' + operation + ': ' + type);
+                refresh();
+            }).catch(function (err) {
+                toast('Global limit failed: ' + err.message, true);
+            });
         }
     });
 

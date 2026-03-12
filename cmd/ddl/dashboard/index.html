@@ -29,6 +29,13 @@
         <div id="offline-banner" class="offline-banner" hidden>
             Unable to connect to ddld. Is the daemon running?
         </div>
+        <div id="global-panel" class="detail-panel" hidden>
+            <div class="detail-header">
+                <h2>Global Limits</h2>
+            </div>
+            <div id="global-limits"></div>
+        </div>
+
         <table id="container-table">
             <thead>
                 <tr>
@@ -105,6 +112,28 @@
             </label>
             <label>Operation
                 <select id="limit-operation">
+                    <option value="set">Set</option>
+                    <option value="increase">Increase</option>
+                    <option value="decrease">Decrease</option>
+                </select>
+            </label>
+            <div class="dialog-actions">
+                <button type="button" class="btn" onclick="this.closest('dialog').close()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Apply</button>
+            </div>
+        </form>
+    </dialog>
+
+    <!-- Global Limit Dialog -->
+    <dialog id="global-limit-dialog">
+        <form method="dialog">
+            <h3>Modify Global Limit</h3>
+            <input type="hidden" id="global-limit-type">
+            <label>Value
+                <input type="text" id="global-limit-value" required placeholder="e.g. 24h, 10g, 100.00">
+            </label>
+            <label>Operation
+                <select id="global-limit-operation">
                     <option value="set">Set</option>
                     <option value="increase">Increase</option>
                     <option value="decrease">Decrease</option>

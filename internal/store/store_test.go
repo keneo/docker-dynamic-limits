@@ -294,3 +294,73 @@ func TestRegisterContainerReplace(t *testing.T) {
 		t.Errorf("GetContainer Name = %q, want %q", got.Name, "name2")
 	}
 }
+
+func TestSetAndGetGlobalLimit(t *testing.T) {
+	s := newTestStore(t)
+
+	err := s.SetGlobalLimit(model.LimitCPU, 86400)
+	if err != nil {
+		t.Fatalf("SetGlobalLimit: %v", err)
+	}
+
+	got, err := s.GetGlobalLimit(model.LimitCPU)
+	if err != nil {
+		t.Fatalf("GetGlobalLimit: %v", err)
+	}
+	if got != 86400 {
+		t.Errorf("got %d, want 86400", got)
+	}
+}
+
+func TestGetGlobalLimitDefault(t *testing.T) {
+	s := newTestStore(t)
+	got, err := s.GetGlobalLimit(model.LimitCPU)
+	if err != nil {
+		t.Fatalf("GetGlobalLimit: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("default global limit = %d, want 0", got)
+	}
+}
+
+func TestSetGlobalLimitOverwrite(t *testing.T) {
+	s := newTestStore(t)
+	s.SetGlobalLimit(model.LimitCPU, 100)
+	s.SetGlobalLimit(model.LimitCPU, 200)
+
+	got, _ := s.GetGlobalLimit(model.LimitCPU)
+	if got != 200 {
+		t.Errorf("got %d, want 200", got)
+	}
+}
+
+func TestGetAllGlobalLimits(t *testing.T) {
+	s := newTestStore(t)
+	s.SetGlobalLimit(model.LimitCPU, 100)
+	s.SetGlobalLimit(model.LimitSpending, 500)
+
+	all, err := s.GetAllGlobalLimits()
+	if err != nil {
+		t.Fatalf("GetAllGlobalLimits: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("len = %d, want 2", len(all))
+	}
+	if all[model.LimitCPU] != 100 {
+		t.Errorf("cpu = %d, want 100", all[model.LimitCPU])
+	}
+	if all[model.LimitSpending] != 500 {
+		t.Errorf("spending = %d, want 500", all[model.LimitSpending])
+	}
+}
+
+func TestGetAllGlobalLimitsEmpty(t *testing.T) {
+	s := newTestStore(t)
+	all, err := s.GetAllGlobalLimits()
+	if err != nil {
+		t.Fatalf("GetAllGlobalLimits: %v", err)
+	}
+	if len(all) != 0 {
+		t.Fatalf("len = %d, want 0", len(all))
+	}
+}

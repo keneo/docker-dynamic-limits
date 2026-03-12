@@ -128,8 +128,15 @@ func main() {
 		log.Printf("Ollama proxy configured: %s (models: %v)", ollamaURL, cfg.AllowedModels)
 	}
 
-	// Create API server
-	srv := api.NewServer(st, dc, em, px, bus, oq)
+	// Start global enforcement
+	em.StartGlobalEnforcement()
+
+	// Create API server with config persistence
+	configPath := filepath.Join(filepath.Dir(*dbPath), "config.json")
+	srv := api.NewServer(st, dc, em, px, bus, oq, configPath)
+
+	// Load persisted config (overlay on top of env var defaults)
+	srv.LoadPersistedConfig()
 
 	// Try to start the unix socket server for full management API.
 	// If it fails (e.g. path not writable), fall back to full API on TCP.

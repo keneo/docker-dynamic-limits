@@ -7,6 +7,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +31,7 @@ type Server struct {
 	bus         *events.Bus
 	ollama      *ollama.Queue
 	mux         *http.ServeMux
+	configPath  string
 
 	ipMu  sync.RWMutex
 	ipMap map[string]string // IP → containerID
@@ -36,7 +39,8 @@ type Server struct {
 }
 
 // NewServer creates a new API server. oq may be nil when Ollama is not configured.
-func NewServer(st store.DataStore, dc docker.DockerClient, em enforcement.EnforcementController, px proxy.SpendingProxy, bus *events.Bus, oq *ollama.Queue) *Server {
+// configPath is the path to persist config changes (empty to disable).
+func NewServer(st store.DataStore, dc docker.DockerClient, em enforcement.EnforcementController, px proxy.SpendingProxy, bus *events.Bus, oq *ollama.Queue, configPath ...string) *Server {
 	s := &Server{
 		store:       st,
 		docker:      dc,
@@ -47,6 +51,9 @@ func NewServer(st store.DataStore, dc docker.DockerClient, em enforcement.Enforc
 		mux:         http.NewServeMux(),
 		ipMap:       make(map[string]string),
 		done:        make(chan struct{}),
+	}
+	if len(configPath) > 0 {
+		s.configPath = configPath[0]
 	}
 	s.registerRoutes()
 	s.refreshIPs()
@@ -74,6 +81,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/providers", s.handleProviders)
 	// Runtime config management
 	s.mux.HandleFunc("/config", s.handleConfig)
+	// Global limits
+	s.mux.HandleFunc("/global-limits", s.handleGlobalLimits)
 }
 
 // Handler returns the HTTP handler (full API).
@@ -105,6 +114,75 @@ func (s *Server) handleContainersReadOnly(w http.ResponseWriter, r *http.Request
 	s.handleContainers(w, r)
 }
 
+// handleGlobalLimits handles GET and PUT for /global-limits.
+func (s *Server) handleGlobalLimits(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		limits, err := s.store.GetAllGlobalLimits()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, limits)
+
+	case http.MethodPut:
+		var req struct {
+			Type      string `json:"type"`
+			Value     int64  `json:"value"`
+			Operation string `json:"operation"` // "set", "increase", "decrease"
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		lt := model.LimitType(req.Type)
+		oldValue, _ := s.store.GetGlobalLimit(lt)
+		var newValue int64
+
+		switch req.Operation {
+		case "set", "":
+			newValue = req.Value
+		case "increase":
+			newValue = oldValue + req.Value
+		case "decrease":
+			newValue = oldValue - req.Value
+			if newValue < 0 {
+				newValue = 0
+			}
+		default:
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid operation: %s", req.Operation))
+			return
+		}
+
+		if err := s.store.SetGlobalLimit(lt, newValue); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		if s.bus != nil {
+			op := req.Operation
+			if op == "" {
+				op = "set"
+			}
+			s.bus.PublishData(events.LimitChange, "", events.LimitChangeData{
+				LimitType: req.Type,
+				OldValue:  oldValue,
+				NewValue:  newValue,
+				Operation: op,
+			})
+		}
+
+		writeJSON(w, map[string]interface{}{
+			"type":  req.Type,
+			"value": newValue,
+		})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // --- Container management ---
 
 func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
@@ -119,12 +197,27 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var result []model.ContainerStatus
+	var statuses []model.ContainerStatus
 	for _, c := range containers {
 		status := s.buildStatus(c)
-		result = append(result, status)
+		statuses = append(statuses, status)
 	}
-	writeJSON(w, result)
+
+	// Build global status
+	globalLimits, _ := s.store.GetAllGlobalLimits()
+	globalUsage := make(map[model.LimitType]int64)
+	for _, cs := range statuses {
+		for lt, v := range cs.Usage {
+			globalUsage[lt] += v
+		}
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"containers":      statuses,
+		"global_limits":   globalLimits,
+		"global_usage":    globalUsage,
+		"global_enforced": s.enforcement.GetGlobalEnforced(),
+	})
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -779,6 +872,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
+		s.persistConfig(req)
 		writeJSON(w, s.buildConfigResponse())
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -895,6 +989,58 @@ func (s *Server) applyConfig(st *proxy.SpendingTracker, req map[string]interface
 		}
 	}
 	return nil
+}
+
+// persistConfig merges the given config keys into the persisted config file.
+func (s *Server) persistConfig(updates map[string]interface{}) {
+	if s.configPath == "" {
+		return
+	}
+
+	existing := make(map[string]interface{})
+	if data, err := os.ReadFile(s.configPath); err == nil {
+		json.Unmarshal(data, &existing)
+	}
+	for k, v := range updates {
+		existing[k] = v
+	}
+	data, err := json.MarshalIndent(existing, "", "  ")
+	if err != nil {
+		log.Printf("[api] error marshaling config: %v", err)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(s.configPath), 0755); err != nil {
+		log.Printf("[api] error creating config dir: %v", err)
+		return
+	}
+	if err := os.WriteFile(s.configPath, data, 0600); err != nil {
+		log.Printf("[api] error writing config file: %v", err)
+	}
+}
+
+// LoadPersistedConfig reads the config file and applies it via applyConfig.
+func (s *Server) LoadPersistedConfig() {
+	if s.configPath == "" {
+		return
+	}
+	data, err := os.ReadFile(s.configPath)
+	if err != nil {
+		return // file doesn't exist yet — nothing to load
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		log.Printf("[api] error parsing persisted config: %v", err)
+		return
+	}
+	st, ok := s.proxy.(*proxy.SpendingTracker)
+	if !ok {
+		return
+	}
+	if err := s.applyConfig(st, cfg); err != nil {
+		log.Printf("[api] error applying persisted config: %v", err)
+	} else {
+		log.Printf("[api] loaded persisted config from %s", s.configPath)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {

@@ -52,10 +52,11 @@ func TestListContainersEmpty(t *testing.T) {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
 	}
 
-	var result []model.ContainerStatus
+	var result map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&result)
-	if result != nil && len(result) != 0 {
-		t.Errorf("expected empty list, got %d items", len(result))
+	containers, _ := result["containers"].([]interface{})
+	if containers != nil && len(containers) != 0 {
+		t.Errorf("expected empty containers list, got %d items", len(containers))
 	}
 }
 
@@ -916,5 +917,173 @@ func TestRegisterIncludesOllamaAvailable(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&result)
 	if result["ollama_available"] != false {
 		t.Errorf("ollama_available = %v, want false", result["ollama_available"])
+	}
+}
+
+func TestGetGlobalLimitsEmpty(t *testing.T) {
+	ts, _, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/global-limits")
+	if err != nil {
+		t.Fatalf("GET /global-limits: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if len(result) != 0 {
+		t.Errorf("expected empty map, got %v", result)
+	}
+}
+
+func TestSetGlobalLimit(t *testing.T) {
+	ts, ms, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"type":      "cpu",
+		"value":     86400,
+		"operation": "set",
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/global-limits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT /global-limits: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["value"].(float64) != 86400 {
+		t.Errorf("value = %v, want 86400", result["value"])
+	}
+
+	// Verify stored
+	lim, _ := ms.GetGlobalLimit(model.LimitCPU)
+	if lim != 86400 {
+		t.Errorf("stored global limit = %d, want 86400", lim)
+	}
+}
+
+func TestIncreaseGlobalLimit(t *testing.T) {
+	ts, ms, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	ms.SetGlobalLimit(model.LimitCPU, 100)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"type":      "cpu",
+		"value":     50,
+		"operation": "increase",
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/global-limits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT /global-limits: %v", err)
+	}
+	defer resp.Body.Close()
+
+	lim, _ := ms.GetGlobalLimit(model.LimitCPU)
+	if lim != 150 {
+		t.Errorf("global limit = %d, want 150", lim)
+	}
+}
+
+func TestDecreaseGlobalLimit(t *testing.T) {
+	ts, ms, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	ms.SetGlobalLimit(model.LimitCPU, 100)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"type":      "cpu",
+		"value":     150,
+		"operation": "decrease",
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/global-limits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT /global-limits: %v", err)
+	}
+	defer resp.Body.Close()
+
+	lim, _ := ms.GetGlobalLimit(model.LimitCPU)
+	if lim != 0 {
+		t.Errorf("global limit = %d, want 0 (floor)", lim)
+	}
+}
+
+func TestContainersResponseIncludesGlobalLimits(t *testing.T) {
+	ts, ms, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	ms.SetGlobalLimit(model.LimitCPU, 86400)
+
+	resp, err := http.Get(ts.URL + "/containers")
+	if err != nil {
+		t.Fatalf("GET /containers: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	globalLimits, ok := result["global_limits"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected global_limits in response, got %T", result["global_limits"])
+	}
+	if globalLimits["cpu"].(float64) != 86400 {
+		t.Errorf("global cpu limit = %v, want 86400", globalLimits["cpu"])
+	}
+}
+
+func TestConfigPersistence(t *testing.T) {
+	ms := testutil.NewMockStore()
+	md := testutil.NewMockDocker()
+	me := testutil.NewMockEnforcement()
+	bus := events.NewBus()
+
+	px := proxy.NewSpendingTracker(nil)
+
+	configPath := t.TempDir() + "/config.json"
+	srv := NewServer(ms, md, me, px, bus, nil, configPath)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Set a config value
+	body, _ := json.Marshal(map[string]interface{}{
+		"anthropic_enabled": true,
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT /config: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	// Create a new server with the same config path — it should load persisted config
+	px2 := proxy.NewSpendingTracker(nil)
+	srv2 := NewServer(ms, md, me, px2, bus, nil, configPath)
+	srv2.LoadPersistedConfig()
+
+	enabled := px2.GetEnabledHosts()
+	if !enabled["api.anthropic.com"] {
+		t.Error("anthropic should be enabled after loading persisted config")
 	}
 }

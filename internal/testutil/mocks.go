@@ -14,17 +14,19 @@ import (
 
 // MockStore implements store.DataStore using in-memory maps.
 type MockStore struct {
-	mu         sync.Mutex
-	Containers map[string]*model.Container
-	Limits     map[string]map[model.LimitType]int64
-	Usages     map[string]map[model.LimitType]int64
+	mu           sync.Mutex
+	Containers   map[string]*model.Container
+	Limits       map[string]map[model.LimitType]int64
+	Usages       map[string]map[model.LimitType]int64
+	GlobalLimits map[model.LimitType]int64
 }
 
 func NewMockStore() *MockStore {
 	return &MockStore{
-		Containers: make(map[string]*model.Container),
-		Limits:     make(map[string]map[model.LimitType]int64),
-		Usages:     make(map[string]map[model.LimitType]int64),
+		Containers:   make(map[string]*model.Container),
+		Limits:       make(map[string]map[model.LimitType]int64),
+		Usages:       make(map[string]map[model.LimitType]int64),
+		GlobalLimits: make(map[model.LimitType]int64),
 	}
 }
 
@@ -170,6 +172,29 @@ func (s *MockStore) ResolveContainerID(query string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("container %q not found", query)
+}
+
+func (s *MockStore) SetGlobalLimit(limitType model.LimitType, value int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.GlobalLimits[limitType] = value
+	return nil
+}
+
+func (s *MockStore) GetGlobalLimit(limitType model.LimitType) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.GlobalLimits[limitType], nil
+}
+
+func (s *MockStore) GetAllGlobalLimits() (map[model.LimitType]int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make(map[model.LimitType]int64)
+	for k, v := range s.GlobalLimits {
+		result[k] = v
+	}
+	return result, nil
 }
 
 // --- MockDocker ---
@@ -475,17 +500,20 @@ func (c *MockCgroup) ReadNetworkStats(vethName string) (*cgroup.NetworkStats, er
 
 // MockEnforcement implements enforcement.EnforcementController.
 type MockEnforcement struct {
-	mu       sync.Mutex
-	Started  map[string]string          // containerID -> dockerID
-	Stopped  []string
-	Enforced map[string]map[model.LimitType]bool
-	Notified []string
+	mu              sync.Mutex
+	Started         map[string]string          // containerID -> dockerID
+	Stopped         []string
+	Enforced        map[string]map[model.LimitType]bool
+	Notified        []string
+	GlobalEnforced  map[model.LimitType]bool
+	GlobalStarted   bool
 }
 
 func NewMockEnforcement() *MockEnforcement {
 	return &MockEnforcement{
-		Started:  make(map[string]string),
-		Enforced: make(map[string]map[model.LimitType]bool),
+		Started:        make(map[string]string),
+		Enforced:       make(map[string]map[model.LimitType]bool),
+		GlobalEnforced: make(map[model.LimitType]bool),
 	}
 }
 
@@ -554,6 +582,28 @@ func (e *MockEnforcement) WasNotified() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return len(e.Notified) > 0
+}
+
+func (e *MockEnforcement) StartGlobalEnforcement() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.GlobalStarted = true
+}
+
+func (e *MockEnforcement) IsGlobalEnforced(lt model.LimitType) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.GlobalEnforced[lt]
+}
+
+func (e *MockEnforcement) GetGlobalEnforced() map[model.LimitType]bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	result := make(map[model.LimitType]bool)
+	for k, v := range e.GlobalEnforced {
+		result[k] = v
+	}
+	return result
 }
 
 // --- MockProxy ---

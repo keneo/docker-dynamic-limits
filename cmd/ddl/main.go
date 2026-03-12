@@ -120,6 +120,7 @@ Environment variables:
 	root.AddCommand(limitsCmd())
 	root.AddCommand(usageCmd())
 	root.AddCommand(usageAllCmd())
+	root.AddCommand(usageGlobalCmd())
 	root.AddCommand(cloneCmd())
 	root.AddCommand(lsCmd())
 	root.AddCommand(removeCmd())
@@ -273,6 +274,57 @@ Examples:
 				return printJSON(resp)
 			}
 			printLimitsOrUsage(resp, "Limit")
+			return nil
+		},
+	})
+
+	// Global limit commands
+	limits.AddCommand(&cobra.Command{
+		Use:   "set-global <type> <value>",
+		Short: "Set a global limit to an absolute value",
+		Long: `Set a global resource limit that applies to the sum of all containers.
+
+Uses the same value formats as "limits set".
+
+Examples:
+  ddl limits set-global cpu 24h
+  ddl limits set-global spending 100.00`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return setGlobalLimit(args[0], args[1], "set")
+		},
+	})
+
+	limits.AddCommand(&cobra.Command{
+		Use:   "increase-global <type> <value>",
+		Short: "Increase a global limit by the given amount",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return setGlobalLimit(args[0], args[1], "increase")
+		},
+	})
+
+	limits.AddCommand(&cobra.Command{
+		Use:   "decrease-global <type> <value>",
+		Short: "Decrease a global limit by the given amount",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return setGlobalLimit(args[0], args[1], "decrease")
+		},
+	})
+
+	limits.AddCommand(&cobra.Command{
+		Use:   "get-global",
+		Short: "Show all global limits",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiGet("/global-limits")
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return printJSON(resp)
+			}
+			printLimitsOrUsage(resp, "Global Limit")
 			return nil
 		},
 	})
@@ -569,6 +621,98 @@ func setLimit(container, limitType, valueStr, operation string) error {
 }
 
 
+func setGlobalLimit(limitType, valueStr, operation string) error {
+	value, err := parseValue(limitType, valueStr)
+	if err != nil {
+		return fmt.Errorf("invalid value %q for %s: %w", valueStr, limitType, err)
+	}
+
+	body := map[string]interface{}{
+		"type":      limitType,
+		"value":     value,
+		"operation": operation,
+	}
+	data, _ := json.Marshal(body)
+
+	req, err := http.NewRequest(http.MethodPut, apiURL+"/global-limits", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return wrapConnErr(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return readAPIError(resp)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if jsonOutput {
+		return printJSON(result)
+	}
+
+	newVal := int64(result["value"].(float64))
+	verb := operation
+	switch operation {
+	case "set":
+		verb = "set"
+	case "increase":
+		verb = "increased"
+	case "decrease":
+		verb = "decreased"
+	}
+	fmt.Printf("global %s limit %s to %s\n", limitType, verb, formatValue(limitType, newVal))
+	return nil
+}
+
+func usageGlobalCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "usage-global",
+		Short: "Show aggregated usage across all containers vs global limits",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := fetchContainersResponse()
+			if err != nil {
+				return err
+			}
+
+			if jsonOutput {
+				return printJSON(map[string]interface{}{
+					"global_limits":   result.GlobalLimits,
+					"global_usage":    result.GlobalUsage,
+					"global_enforced": result.GlobalEnforced,
+				})
+			}
+
+			types := []string{"cpu", "ram", "net", "disk", "disk-io-bytes", "disk-io-ops", "spending",
+				"ram-usage-bsec", "disk-usage-bsec", "ram-request-bsec", "disk-request-bsec"}
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintf(w, "TYPE\tUSAGE\tGLOBAL LIMIT\tSTATUS\n")
+			for _, t := range types {
+				u := getJSONFloat(result.GlobalUsage, t)
+				l := getJSONFloat(result.GlobalLimits, t)
+				status := "-"
+				if l > 0 {
+					pct := u / l * 100
+					status = fmt.Sprintf("%.1f%%", pct)
+					if u >= l {
+						status += " ENFORCED"
+					}
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t, formatValue(t, int64(u)), formatValue(t, int64(l)), status)
+			}
+			w.Flush()
+			return nil
+		},
+	}
+}
+
 func apiGet(path string) (map[string]interface{}, error) {
 	resp, err := httpClient.Get(apiURL + path)
 	if err != nil {
@@ -610,7 +754,15 @@ func apiPostPath(path string, body interface{}) (map[string]interface{}, error) 
 	return result, nil
 }
 
-func fetchContainers() ([]map[string]interface{}, error) {
+// containersResponse represents the response from GET /containers.
+type containersResponse struct {
+	Containers     []map[string]interface{} `json:"containers"`
+	GlobalLimits   map[string]interface{}   `json:"global_limits"`
+	GlobalUsage    map[string]interface{}   `json:"global_usage"`
+	GlobalEnforced map[string]interface{}   `json:"global_enforced"`
+}
+
+func fetchContainersResponse() (*containersResponse, error) {
 	resp, err := httpClient.Get(apiURL + "/containers")
 	if err != nil {
 		return nil, wrapConnErr(err)
@@ -621,11 +773,19 @@ func fetchContainers() ([]map[string]interface{}, error) {
 		return nil, readAPIError(resp)
 	}
 
-	var containers []map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&containers); err != nil {
+	var result containersResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-	return containers, nil
+	return &result, nil
+}
+
+func fetchContainers() ([]map[string]interface{}, error) {
+	result, err := fetchContainersResponse()
+	if err != nil {
+		return nil, err
+	}
+	return result.Containers, nil
 }
 
 func readAPIError(resp *http.Response) error {

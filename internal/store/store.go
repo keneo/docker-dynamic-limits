@@ -26,6 +26,9 @@ type DataStore interface {
 	AddUsage(containerID string, limitType model.LimitType, delta int64) error
 	CopyLimits(fromID, toID string) error
 	ResolveContainerID(query string) (string, error)
+	SetGlobalLimit(limitType model.LimitType, value int64) error
+	GetGlobalLimit(limitType model.LimitType) (int64, error)
+	GetAllGlobalLimits() (map[model.LimitType]int64, error)
 }
 
 // Store provides persistent storage for container registrations, limits, and usage.
@@ -69,6 +72,10 @@ func (s *Store) migrate() error {
 			value INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (container_id, type),
 			FOREIGN KEY (container_id) REFERENCES containers(id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS global_limits (
+			type TEXT PRIMARY KEY,
+			value INTEGER NOT NULL DEFAULT 0
 		)`,
 	}
 	for _, stmt := range stmts {
@@ -306,4 +313,52 @@ func (s *Store) ResolveContainerID(query string) (string, error) {
 	}
 
 	return "", fmt.Errorf("container %q not found", query)
+}
+
+// SetGlobalLimit sets or updates a global limit for a limit type.
+func (s *Store) SetGlobalLimit(limitType model.LimitType, value int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO global_limits (type, value) VALUES (?, ?)`,
+		string(limitType), value,
+	)
+	return err
+}
+
+// GetGlobalLimit retrieves the global limit for a type. Returns 0 if not set.
+func (s *Store) GetGlobalLimit(limitType model.LimitType) (int64, error) {
+	row := s.db.QueryRow(
+		`SELECT value FROM global_limits WHERE type = ?`,
+		string(limitType),
+	)
+	var val int64
+	if err := row.Scan(&val); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return val, nil
+}
+
+// GetAllGlobalLimits returns all global limits.
+func (s *Store) GetAllGlobalLimits() (map[model.LimitType]int64, error) {
+	rows, err := s.db.Query(`SELECT type, value FROM global_limits`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[model.LimitType]int64)
+	for rows.Next() {
+		var t string
+		var v int64
+		if err := rows.Scan(&t, &v); err != nil {
+			return nil, err
+		}
+		result[model.LimitType(t)] = v
+	}
+	return result, rows.Err()
 }

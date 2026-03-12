@@ -17,6 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Key Requirements
 
 - For each container and each limit type: check current usage, set/increase/decrease limits
+- **Global limits**: shared budgets across all containers — the SUM of all container usage is checked against the global limit. When exceeded, enforcement is applied to ALL containers (same action per limit type as per-container enforcement). The `isOtherPauseActive` check includes global enforcement state to prevent unpausing a container that's globally enforced.
 - Container cloning capability
 - Containers must be able to query their own limits and usage from inside the container
 
@@ -38,6 +39,8 @@ The daemon supports runtime configuration via `ddl config get` / `ddl config set
 | `ollama-default-bid` | int | yes | milli-cents/wall-sec |
 
 API: `GET /config` returns all config (keys masked), `PUT /config` accepts partial JSON updates. The dashboard shows config read-only in a collapsible panel.
+
+**Config persistence**: `PUT /config` changes are persisted to a JSON file (`config.json` in the same directory as the SQLite database). On daemon startup, persisted config is loaded and overlaid on environment variable defaults. Only explicitly set keys are persisted.
 
 ## System Sleep Handling
 

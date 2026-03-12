@@ -19,7 +19,8 @@ const (
 	OllamaDequeue      EventType = "ollama_dequeue"
 	OllamaCancel       EventType = "ollama_cancel"
 	OllamaBidChange    EventType = "ollama_bid_change"
-	SystemSleep        EventType = "system_sleep"
+	SystemSleep              EventType = "system_sleep"
+	GlobalEnforcementChange  EventType = "global_enforcement_change"
 )
 
 // Event is the top-level envelope sent to subscribers.
@@ -86,6 +87,12 @@ type OllamaBidChangeData struct {
 // SystemSleepData is the payload for system_sleep events.
 type SystemSleepData struct {
 	DurationSeconds float64 `json:"duration_seconds"`
+}
+
+// GlobalEnforcementChangeData is the payload for global_enforcement_change events.
+type GlobalEnforcementChangeData struct {
+	LimitType string `json:"limit_type"`
+	Enforced  bool   `json:"enforced"`
 }
 
 // Filter controls which events a subscriber receives.

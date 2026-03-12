@@ -22,6 +22,7 @@ Dynamic resource limit management for Docker containers. Set, monitor, and enfor
 | **Disk request B·s** | Byte-seconds (ddl disk limit × time) | Container kill |
 
 - **Per-container limits** — set, increase, or decrease any limit at any time
+- **Global limits** — shared budgets across all containers (sum of usage vs global limit)
 - **Automatic enforcement** — daemon polls every second and applies/releases enforcement actions
 - **Spending tracking** — transparent HTTP proxy intercepts OpenAI and Anthropic API calls, extracts token usage from responses, and calculates costs using built-in model pricing
 - **Container cloning** — clone a running container with all its limits copied over
@@ -148,12 +149,27 @@ ddl limits increase <container> cpu 30m
 ddl limits decrease <container> ram 128m
 ```
 
+### Global limits
+
+Global limits apply a shared budget across **all** containers. When the sum of all container usage exceeds a global limit, enforcement is applied to every container.
+
+```bash
+ddl limits set-global cpu 24h           # 24 hours of CPU across all containers
+ddl limits set-global spending 100.00   # $100 total spending budget
+ddl limits increase-global cpu 12h
+ddl limits decrease-global spending 10.00
+ddl limits get-global                   # show all global limits with usage
+ddl usage-global                        # aggregated usage vs global limits
+```
+
 ### Monitor
 
 ```bash
 ddl usage <container>    # usage vs limits with percentages
 ddl usage-all            # usage for all containers at once
+ddl usage-global         # global usage totals vs global limits
 ddl limits get <container>
+ddl limits get-global    # global limits overview
 ddl ls                   # list all managed containers
 ```
 
@@ -210,6 +226,7 @@ Event types:
 | `ollama_dequeue` | Ollama inference request completed | Queue processor |
 | `ollama_cancel` | Ollama request cancelled/timed out | Queue timeout/cancel |
 | `ollama_bid_change` | Container's Ollama bid changed | `PUT /ollama/bid` |
+| `global_enforcement_change` | Global enforcement applied or released | Global enforcement loop |
 
 The WebSocket endpoint is `GET /events` with optional query parameters:
 - `container_id` — comma-separated container IDs to filter
@@ -276,6 +293,10 @@ The daemon exposes two interfaces:
 | `GET` | `/usage` | In-container usage self-query |
 | `GET` | `/limits` | In-container limits self-query |
 | `GET` | `/events` | WebSocket event stream (query: `container_id`, `types`) |
+| `GET` | `/global-limits` | Get all global limits |
+| `PUT` | `/global-limits` | Set/increase/decrease a global limit |
+| `GET` | `/config` | Get runtime configuration (keys masked) |
+| `PUT` | `/config` | Update runtime configuration (persisted to disk) |
 
 **Read-only API** (TCP — for containers):
 
@@ -537,7 +558,7 @@ Wall-clock time includes model loading, VRAM allocation, prompt eval, and genera
 ## Testing
 
 ```bash
-# Unit tests (80 tests across 8 packages)
+# Unit tests
 go test ./...
 
 # E2E: CLI + spending proxy
