@@ -195,6 +195,7 @@ Examples:
 
 			if ready {
 				fmt.Printf("ddl-daemon started (container %s)\n", containerID)
+				runOnRestartHooks()
 			} else {
 				fmt.Printf("ddl-daemon started (container %s) but not yet responding on port %d\n", containerID, port)
 			}

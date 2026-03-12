@@ -249,6 +249,18 @@ ddl dashboard stop        # stop the dashboard
 
 The dashboard shows all containers with their limits, usage, and enforcement status. You can register, clone, remove containers and set limits directly from the UI. An offline banner appears when the daemon is unreachable.
 
+## Daemon restart hooks
+
+Register shell commands that run automatically on the host after every `ddl daemon start`:
+
+```bash
+ddl hooks add "docker network connect my-net ddl-daemon"
+ddl hooks list          # show all hooks with index
+ddl hooks remove 1      # remove hook by index
+```
+
+Hooks are stored in `~/.config/ddl/hooks.json` and execute sequentially via `sh -c` after the daemon is ready. A failed hook prints a warning but does not abort startup.
+
 ## In-container self-query
 
 Containers are automatically identified by their source IP address (refreshed every 5 seconds). No tokens or headers needed.

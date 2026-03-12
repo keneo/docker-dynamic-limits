@@ -53,6 +53,10 @@ Per-container proxy activity is recorded in an in-memory ring buffer (last 20 en
 
 API: `GET /containers/{id}/activity` returns `[]ProxyActivity`. Activity is also included in `GET /containers/{id}` response. The dashboard shows a "Recent Proxy Activity" table in the container detail panel with expandable rows for request/response bodies.
 
+## Daemon Restart Hooks
+
+CLI users can register shell commands that run on the host after every `ddl daemon start`. Managed via `ddl hooks add/list/remove`. Stored locally in `~/.config/ddl/hooks.json`. Executed sequentially via `sh -c` after daemon readiness check in `daemonStartCmd()`. Failed hooks warn but don't abort.
+
 ## System Sleep Handling
 
 When the host Mac sleeps (lid close), Docker Desktop's Linux VM suspends. The daemon detects this via wall-clock time gaps between enforcement ticks and takes corrective action:

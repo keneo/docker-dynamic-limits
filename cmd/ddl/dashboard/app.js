@@ -338,6 +338,7 @@
 
     // --- Activity ---
     let currentActivity = [];
+    let expandedActivityRows = {};  // track which rows are expanded across re-renders
 
     function fetchActivity(containerID) {
         api('GET', '/containers/' + containerID + '/activity').then(function (data) {
@@ -370,6 +371,7 @@
             var statusClass = a.error ? 'activity-error' : (a.status_code >= 400 ? 'activity-warn' : '');
             var statusText = a.error || (a.status_code || '-');
             var dur = a.duration_ms ? (a.duration_ms / 1000).toFixed(1) + 's' : '-';
+            var isExpanded = !!expandedActivityRows[i];
 
             html += '<tr class="activity-row ' + statusClass + '" data-idx="' + i + '">' +
                 '<td>' + esc(time) + '</td>' +
@@ -381,7 +383,7 @@
                 '<td>' + esc(String(statusText)) + '</td>' +
                 '<td>' + dur + '</td>' +
                 '</tr>' +
-                '<tr class="activity-body-row" data-idx="' + i + '" hidden>' +
+                '<tr class="activity-body-row" data-idx="' + i + '"' + (isExpanded ? '' : ' hidden') + '>' +
                 '<td colspan="8"><div class="activity-bodies">' +
                 '<div><strong>Request:</strong><pre class="activity-body">' + esc(formatJSON(a.request_body)) + '</pre></div>' +
                 '<div><strong>Response:</strong><pre class="activity-body">' + esc(formatJSON(a.response_body)) + '</pre></div>' +
@@ -395,7 +397,14 @@
             row.addEventListener('click', function () {
                 var idx = row.dataset.idx;
                 var bodyRow = el.querySelector('.activity-body-row[data-idx="' + idx + '"]');
-                if (bodyRow) bodyRow.hidden = !bodyRow.hidden;
+                if (bodyRow) {
+                    bodyRow.hidden = !bodyRow.hidden;
+                    if (bodyRow.hidden) {
+                        delete expandedActivityRows[idx];
+                    } else {
+                        expandedActivityRows[idx] = true;
+                    }
+                }
             });
         });
     }
@@ -502,6 +511,7 @@
     document.getElementById('detail-close').addEventListener('click', function () {
         selectedID = null;
         currentActivity = [];
+        expandedActivityRows = {};
         var actEl = document.getElementById('detail-activity');
         if (actEl) actEl.remove();
         detailPanel.hidden = true;

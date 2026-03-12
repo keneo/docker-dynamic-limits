@@ -129,6 +129,7 @@ Environment variables:
 	root.AddCommand(configCmd())
 	root.AddCommand(daemonCmd())
 	root.AddCommand(logsCmd())
+	root.AddCommand(hooksCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
