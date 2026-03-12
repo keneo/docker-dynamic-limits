@@ -72,6 +72,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/ollama/models", s.handleOllamaModels)
 	// Provider management
 	s.mux.HandleFunc("/providers", s.handleProviders)
+	// Runtime config management
+	s.mux.HandleFunc("/config", s.handleConfig)
 }
 
 // Handler returns the HTTP handler (full API).
@@ -754,6 +756,145 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// --- Runtime config management ---
+
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, s.buildConfigResponse())
+	case http.MethodPut:
+		st, ok := s.proxy.(*proxy.SpendingTracker)
+		if !ok {
+			writeError(w, http.StatusNotImplemented, fmt.Errorf("config management not available"))
+			return
+		}
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := s.applyConfig(st, req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, s.buildConfigResponse())
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) buildConfigResponse() map[string]interface{} {
+	result := map[string]interface{}{}
+
+	if st, ok := s.proxy.(*proxy.SpendingTracker); ok {
+		enabled := st.GetEnabledHosts()
+		result["anthropic_enabled"] = enabled["api.anthropic.com"]
+		result["openai_enabled"] = enabled["api.openai.com"]
+		result["ollama_enabled"] = enabled["ollama"]
+		result["anthropic_key_set"] = st.HasAPIKey("api.anthropic.com")
+		result["openai_key_set"] = st.HasAPIKey("api.openai.com")
+	}
+
+	if s.ollama != nil {
+		cfg := s.ollama.GetConfig()
+		result["ollama_url"] = cfg.OllamaURL
+		result["ollama_models"] = cfg.AllowedModels
+		result["ollama_queue_size"] = cfg.MaxQueueSize
+		result["ollama_timeout"] = cfg.RequestTimeout.String()
+		result["ollama_default_bid"] = cfg.DefaultBid
+	}
+
+	return result
+}
+
+func (s *Server) applyConfig(st *proxy.SpendingTracker, req map[string]interface{}) error {
+	for key, val := range req {
+		switch key {
+		case "anthropic_enabled":
+			b, ok := val.(bool)
+			if !ok {
+				return fmt.Errorf("anthropic_enabled: expected bool")
+			}
+			st.EnableHost("api.anthropic.com", b)
+		case "openai_enabled":
+			b, ok := val.(bool)
+			if !ok {
+				return fmt.Errorf("openai_enabled: expected bool")
+			}
+			st.EnableHost("api.openai.com", b)
+		case "ollama_enabled":
+			b, ok := val.(bool)
+			if !ok {
+				return fmt.Errorf("ollama_enabled: expected bool")
+			}
+			st.EnableHost("ollama", b)
+		case "anthropic_key":
+			keyVal, ok := val.(string)
+			if !ok {
+				return fmt.Errorf("anthropic_key: expected string")
+			}
+			st.SetAPIKey("api.anthropic.com", keyVal)
+		case "openai_key":
+			keyVal, ok := val.(string)
+			if !ok {
+				return fmt.Errorf("openai_key: expected string")
+			}
+			st.SetAPIKey("api.openai.com", keyVal)
+		case "ollama_models":
+			if s.ollama == nil {
+				return fmt.Errorf("ollama not configured")
+			}
+			arr, ok := val.([]interface{})
+			if !ok {
+				return fmt.Errorf("ollama_models: expected array of strings")
+			}
+			models := make([]string, 0, len(arr))
+			for _, v := range arr {
+				m, ok := v.(string)
+				if !ok {
+					return fmt.Errorf("ollama_models: expected array of strings")
+				}
+				models = append(models, m)
+			}
+			s.ollama.SetAllowedModels(models)
+		case "ollama_queue_size":
+			if s.ollama == nil {
+				return fmt.Errorf("ollama not configured")
+			}
+			n, ok := val.(float64)
+			if !ok {
+				return fmt.Errorf("ollama_queue_size: expected number")
+			}
+			s.ollama.SetMaxQueueSize(int(n))
+		case "ollama_timeout":
+			if s.ollama == nil {
+				return fmt.Errorf("ollama not configured")
+			}
+			str, ok := val.(string)
+			if !ok {
+				return fmt.Errorf("ollama_timeout: expected duration string")
+			}
+			d, err := time.ParseDuration(str)
+			if err != nil {
+				return fmt.Errorf("ollama_timeout: %w", err)
+			}
+			s.ollama.SetRequestTimeout(d)
+		case "ollama_default_bid":
+			if s.ollama == nil {
+				return fmt.Errorf("ollama not configured")
+			}
+			n, ok := val.(float64)
+			if !ok {
+				return fmt.Errorf("ollama_default_bid: expected number")
+			}
+			s.ollama.SetDefaultBid(int64(n))
+		default:
+			return fmt.Errorf("unknown config key: %s", key)
+		}
+	}
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {

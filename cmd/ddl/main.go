@@ -125,6 +125,7 @@ Environment variables:
 	root.AddCommand(removeCmd())
 	root.AddCommand(eventsCmd())
 	root.AddCommand(dashboardCmd())
+	root.AddCommand(configCmd())
 	root.AddCommand(daemonCmd())
 
 	if err := root.Execute(); err != nil {

@@ -239,6 +239,74 @@ tbody tr.enforced-row {
     color: var(--text-muted);
 }
 
+/* Config Panel */
+.config-panel {
+    margin-top: 24px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+}
+
+.config-header {
+    padding: 12px 20px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.config-header h2 {
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.config-arrow {
+    font-size: 12px;
+    transition: transform 0.2s ease;
+}
+
+.config-arrow.open {
+    transform: rotate(90deg);
+}
+
+.config-body {
+    padding: 0 20px 16px;
+}
+
+.config-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.config-table th {
+    font-size: 12px;
+}
+
+.config-table td {
+    padding: 6px 12px;
+}
+
+.config-table code {
+    background: var(--bg);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+}
+
+.config-hint {
+    margin-top: 12px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.config-hint code {
+    background: var(--bg);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+}
+
 /* Detail Panel */
 .detail-panel {
     margin-top: 24px;

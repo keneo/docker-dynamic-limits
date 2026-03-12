@@ -20,6 +20,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Container cloning capability
 - Containers must be able to query their own limits and usage from inside the container
 
+## Runtime Configuration
+
+The daemon supports runtime configuration via `ddl config get` / `ddl config set`. Config keys:
+
+| Key | Type | Set | Notes |
+|---|---|---|---|
+| `anthropic-enabled` | bool | yes | Enable/disable Anthropic proxy |
+| `openai-enabled` | bool | yes | Enable/disable OpenAI proxy |
+| `ollama-enabled` | bool | yes | Enable/disable Ollama proxy |
+| `anthropic-key` | string | yes | Masked in `config get` |
+| `openai-key` | string | yes | Masked in `config get` |
+| `ollama-url` | string | no | Read-only (requires restart) |
+| `ollama-models` | list | yes | Comma-separated in CLI |
+| `ollama-queue-size` | int | yes | |
+| `ollama-timeout` | duration | yes | e.g. `2m`, `120s` |
+| `ollama-default-bid` | int | yes | milli-cents/wall-sec |
+
+API: `GET /config` returns all config (keys masked), `PUT /config` accepts partial JSON updates. The dashboard shows config read-only in a collapsible panel.
+
 ## System Sleep Handling
 
 When the host Mac sleeps (lid close), Docker Desktop's Linux VM suspends. The daemon detects this via wall-clock time gaps between enforcement ticks and takes corrective action:

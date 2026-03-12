@@ -305,6 +305,31 @@ func TestIsTrackedAPIWithEnabledHosts(t *testing.T) {
 	}
 }
 
+func TestSetAPIKey(t *testing.T) {
+	st := NewSpendingTracker(nil)
+
+	st.SetAPIKey("api.anthropic.com", "sk-ant-test")
+	if !st.HasAPIKey("api.anthropic.com") {
+		t.Error("HasAPIKey should return true after SetAPIKey")
+	}
+	if st.HasAPIKey("api.openai.com") {
+		t.Error("HasAPIKey should return false for unconfigured host")
+	}
+
+	// Overwrite
+	st.SetAPIKey("api.anthropic.com", "sk-ant-new")
+	if st.apiKeys["api.anthropic.com"] != "sk-ant-new" {
+		t.Errorf("key = %q, want sk-ant-new", st.apiKeys["api.anthropic.com"])
+	}
+}
+
+func TestHasAPIKeyEmpty(t *testing.T) {
+	st := NewSpendingTracker(nil)
+	if st.HasAPIKey("api.anthropic.com") {
+		t.Error("HasAPIKey should return false for empty tracker")
+	}
+}
+
 func TestOllamaHostDispatch(t *testing.T) {
 	st := NewSpendingTracker(nil)
 

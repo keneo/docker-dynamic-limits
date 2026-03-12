@@ -694,6 +694,77 @@ func TestSleepDuring(t *testing.T) {
 	}
 }
 
+func TestGetConfig(t *testing.T) {
+	q, _, _, _ := newTestQueue("http://192.168.1.100:11434")
+	defer q.Stop()
+
+	cfg := q.GetConfig()
+	if cfg.OllamaURL != "http://192.168.1.100:11434" {
+		t.Errorf("OllamaURL = %q, want http://192.168.1.100:11434", cfg.OllamaURL)
+	}
+	if len(cfg.AllowedModels) != 2 {
+		t.Fatalf("AllowedModels len = %d, want 2", len(cfg.AllowedModels))
+	}
+	if cfg.MaxQueueSize != 5 {
+		t.Errorf("MaxQueueSize = %d, want 5", cfg.MaxQueueSize)
+	}
+
+	// Verify returned slice is a copy
+	cfg.AllowedModels[0] = "modified"
+	orig := q.GetConfig()
+	if orig.AllowedModels[0] == "modified" {
+		t.Error("GetConfig should return a copy, not a reference")
+	}
+}
+
+func TestSetAllowedModels(t *testing.T) {
+	q, _, _, _ := newTestQueue("http://localhost:11434")
+	defer q.Stop()
+
+	q.SetAllowedModels([]string{"new-model"})
+	cfg := q.GetConfig()
+	if len(cfg.AllowedModels) != 1 || cfg.AllowedModels[0] != "new-model" {
+		t.Errorf("AllowedModels = %v, want [new-model]", cfg.AllowedModels)
+	}
+}
+
+func TestSetMaxQueueSize(t *testing.T) {
+	q, _, _, _ := newTestQueue("http://localhost:11434")
+	defer q.Stop()
+
+	q.SetMaxQueueSize(100)
+	cfg := q.GetConfig()
+	if cfg.MaxQueueSize != 100 {
+		t.Errorf("MaxQueueSize = %d, want 100", cfg.MaxQueueSize)
+	}
+}
+
+func TestSetRequestTimeout(t *testing.T) {
+	q, _, _, _ := newTestQueue("http://localhost:11434")
+	defer q.Stop()
+
+	q.SetRequestTimeout(5 * time.Minute)
+	cfg := q.GetConfig()
+	if cfg.RequestTimeout != 5*time.Minute {
+		t.Errorf("RequestTimeout = %v, want 5m", cfg.RequestTimeout)
+	}
+	// Also verify the client timeout is updated
+	if q.client.Timeout != 5*time.Minute {
+		t.Errorf("client.Timeout = %v, want 5m", q.client.Timeout)
+	}
+}
+
+func TestSetDefaultBidMethod(t *testing.T) {
+	q, _, _, _ := newTestQueue("http://localhost:11434")
+	defer q.Stop()
+
+	q.SetDefaultBid(500)
+	cfg := q.GetConfig()
+	if cfg.DefaultBid != 500 {
+		t.Errorf("DefaultBid = %d, want 500", cfg.DefaultBid)
+	}
+}
+
 func TestDefaultBid(t *testing.T) {
 	ollama := newMockOllama(50*time.Millisecond, map[string]interface{}{"model": "llama3.2:3b"})
 	defer ollama.Close()

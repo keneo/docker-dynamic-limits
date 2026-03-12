@@ -412,6 +412,46 @@ func (q *Queue) AllowedModels() []string {
 	return q.cfg.AllowedModels
 }
 
+// GetConfig returns a copy of the current queue configuration.
+func (q *Queue) GetConfig() Config {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	cfg := q.cfg
+	cfg.AllowedModels = make([]string, len(q.cfg.AllowedModels))
+	copy(cfg.AllowedModels, q.cfg.AllowedModels)
+	return cfg
+}
+
+// SetAllowedModels updates the model allowlist at runtime.
+func (q *Queue) SetAllowedModels(models []string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.cfg.AllowedModels = make([]string, len(models))
+	copy(q.cfg.AllowedModels, models)
+}
+
+// SetMaxQueueSize updates the maximum queue size at runtime.
+func (q *Queue) SetMaxQueueSize(size int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.cfg.MaxQueueSize = size
+}
+
+// SetRequestTimeout updates the Ollama request timeout at runtime.
+func (q *Queue) SetRequestTimeout(d time.Duration) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.cfg.RequestTimeout = d
+	q.client.Timeout = d
+}
+
+// SetDefaultBid updates the default bid at runtime.
+func (q *Queue) SetDefaultBid(bid int64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.cfg.DefaultBid = bid
+}
+
 // OllamaHost returns the host portion of the configured Ollama URL.
 func (q *Queue) OllamaHost() string {
 	u, err := url.Parse(q.cfg.OllamaURL)

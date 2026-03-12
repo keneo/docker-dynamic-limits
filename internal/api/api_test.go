@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/keneo/docker-dynamic-limits/internal/events"
 	"github.com/keneo/docker-dynamic-limits/internal/model"
+	"github.com/keneo/docker-dynamic-limits/internal/proxy"
 	"github.com/keneo/docker-dynamic-limits/internal/testutil"
 )
 
@@ -746,6 +747,154 @@ func TestDeleteContainerRemovesOllama(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestConfigGetWithMockProxy(t *testing.T) {
+	ts, _, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/config")
+	if err != nil {
+		t.Fatalf("GET /config: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+
+	// MockProxy doesn't implement *SpendingTracker, so response should be minimal
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	// Should return OK even with mock proxy (just empty config)
+}
+
+func TestConfigGetWithRealProxy(t *testing.T) {
+	ms := testutil.NewMockStore()
+	md := testutil.NewMockDocker()
+	me := testutil.NewMockEnforcement()
+	bus := events.NewBus()
+
+	px := proxy.NewSpendingTracker(nil)
+	px.SetAPIKeys(map[string]string{"api.anthropic.com": "sk-test"})
+	px.SetEnabledHosts(map[string]bool{
+		"api.anthropic.com": true,
+		"api.openai.com":    false,
+	})
+
+	srv := NewServer(ms, md, me, px, bus, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/config")
+	if err != nil {
+		t.Fatalf("GET /config: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if result["anthropic_enabled"] != true {
+		t.Errorf("anthropic_enabled = %v, want true", result["anthropic_enabled"])
+	}
+	if result["openai_enabled"] != false {
+		t.Errorf("openai_enabled = %v, want false", result["openai_enabled"])
+	}
+	if result["anthropic_key_set"] != true {
+		t.Errorf("anthropic_key_set = %v, want true", result["anthropic_key_set"])
+	}
+	if result["openai_key_set"] != false {
+		t.Errorf("openai_key_set = %v, want false", result["openai_key_set"])
+	}
+}
+
+func TestConfigPutUpdateProvider(t *testing.T) {
+	ms := testutil.NewMockStore()
+	md := testutil.NewMockDocker()
+	me := testutil.NewMockEnforcement()
+	bus := events.NewBus()
+
+	px := proxy.NewSpendingTracker(nil)
+	px.SetEnabledHosts(map[string]bool{
+		"api.anthropic.com": false,
+	})
+
+	srv := NewServer(ms, md, me, px, bus, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"anthropic_enabled": true,
+		"anthropic_key":     "sk-ant-new",
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT /config: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if result["anthropic_enabled"] != true {
+		t.Errorf("anthropic_enabled = %v, want true", result["anthropic_enabled"])
+	}
+	if result["anthropic_key_set"] != true {
+		t.Errorf("anthropic_key_set = %v, want true", result["anthropic_key_set"])
+	}
+}
+
+func TestConfigPutUnknownKey(t *testing.T) {
+	ms := testutil.NewMockStore()
+	md := testutil.NewMockDocker()
+	me := testutil.NewMockEnforcement()
+	bus := events.NewBus()
+
+	px := proxy.NewSpendingTracker(nil)
+	srv := NewServer(ms, md, me, px, bus, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"nonexistent_key": "value",
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT /config: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestConfigPutWithMockProxy(t *testing.T) {
+	ts, _, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	body, _ := json.Marshal(map[string]interface{}{"anthropic_enabled": true})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT /config: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// MockProxy doesn't implement *SpendingTracker, should return 501
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Errorf("status = %d, want 501", resp.StatusCode)
 	}
 }
 

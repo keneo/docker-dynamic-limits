@@ -44,6 +44,21 @@
         </table>
         <p id="empty-msg" class="empty-msg" hidden>No containers registered.</p>
 
+        <div id="config-panel" class="config-panel">
+            <div class="config-header" id="config-toggle">
+                <h2>Configuration <span id="config-arrow" class="config-arrow">&#9654;</span></h2>
+            </div>
+            <div id="config-body" class="config-body" hidden>
+                <table class="config-table">
+                    <thead>
+                        <tr><th>Key</th><th>Value</th></tr>
+                    </thead>
+                    <tbody id="config-tbody"></tbody>
+                </table>
+                <p class="config-hint">Use <code>ddl config set &lt;key&gt; &lt;value&gt;</code> to update configuration.</p>
+            </div>
+        </div>
+
         <div id="detail-panel" class="detail-panel" hidden>
             <div class="detail-header">
                 <h2 id="detail-title"></h2>

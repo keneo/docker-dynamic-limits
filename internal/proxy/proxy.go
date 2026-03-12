@@ -155,6 +155,20 @@ func (st *SpendingTracker) SetAPIKeys(keys map[string]string) {
 	}
 }
 
+// SetAPIKey sets or updates a single API key for a host.
+func (st *SpendingTracker) SetAPIKey(host string, key string) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.apiKeys[host] = key
+}
+
+// HasAPIKey returns true if an API key is configured for the given host.
+func (st *SpendingTracker) HasAPIKey(host string) bool {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	return st.apiKeys[host] != ""
+}
+
 // AddSpending adds milliCents to the spending for a container.
 func (st *SpendingTracker) AddSpending(containerID string, milliCents int64) {
 	st.mu.Lock()

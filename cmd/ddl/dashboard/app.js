@@ -420,6 +420,60 @@
         }
     });
 
+    // --- Config panel ---
+    var configTbody = document.getElementById('config-tbody');
+    var configToggle = document.getElementById('config-toggle');
+    var configBody = document.getElementById('config-body');
+    var configArrow = document.getElementById('config-arrow');
+    var configOpen = false;
+
+    var CONFIG_DISPLAY_ORDER = [
+        { key: 'anthropic-enabled', json: 'anthropic_enabled' },
+        { key: 'openai-enabled', json: 'openai_enabled' },
+        { key: 'ollama-enabled', json: 'ollama_enabled' },
+        { key: 'anthropic-key', json: 'anthropic_key_set', isKey: true },
+        { key: 'openai-key', json: 'openai_key_set', isKey: true },
+        { key: 'ollama-url', json: 'ollama_url' },
+        { key: 'ollama-models', json: 'ollama_models', isList: true },
+        { key: 'ollama-queue-size', json: 'ollama_queue_size' },
+        { key: 'ollama-timeout', json: 'ollama_timeout' },
+        { key: 'ollama-default-bid', json: 'ollama_default_bid' }
+    ];
+
+    configToggle.addEventListener('click', function () {
+        configOpen = !configOpen;
+        configBody.hidden = !configOpen;
+        configArrow.className = 'config-arrow' + (configOpen ? ' open' : '');
+        if (configOpen) refreshConfig();
+    });
+
+    function refreshConfig() {
+        api('GET', '/config').then(function (data) {
+            renderConfig(data || {});
+        }).catch(function () {
+            configTbody.innerHTML = '<tr><td colspan="2">Failed to load config</td></tr>';
+        });
+    }
+
+    function renderConfig(data) {
+        configTbody.innerHTML = '';
+        CONFIG_DISPLAY_ORDER.forEach(function (item) {
+            var tr = document.createElement('tr');
+            var val;
+            if (item.isKey) {
+                val = data[item.json] ? '****' : '(not set)';
+            } else if (item.isList) {
+                var arr = data[item.json];
+                val = (arr && arr.length > 0) ? arr.join(', ') : '(none)';
+            } else {
+                var v = data[item.json];
+                val = (v !== undefined && v !== null) ? String(v) : '(not configured)';
+            }
+            tr.innerHTML = '<td><code>' + esc(item.key) + '</code></td><td>' + esc(val) + '</td>';
+            configTbody.appendChild(tr);
+        });
+    }
+
     // --- Init ---
     refresh();
     startAutoRefresh();
