@@ -11,6 +11,7 @@ install: build
 	install -m 755 ddl $(PREFIX)/ddl
 	install -m 755 ddld $(PREFIX)/ddld
 	install -m 755 ddl-guest $(PREFIX)/ddl-guest
+	docker build -t ddld:latest .
 
 uninstall:
 	rm -f $(PREFIX)/ddl $(PREFIX)/ddld $(PREFIX)/ddl-guest
