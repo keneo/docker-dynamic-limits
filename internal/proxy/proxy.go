@@ -120,6 +120,16 @@ func defaultPrices() map[string]ModelPricing {
 	}
 }
 
+// SeedSpending pre-loads spending totals (in milli-cents) so that
+// incremental updates don't start from zero after a daemon restart.
+func (st *SpendingTracker) SeedSpending(totals map[string]int64) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for id, milliCents := range totals {
+		st.spending[id] = milliCents * 1_000 // milli-cents → micro-cents
+	}
+}
+
 // RegisterContainer sets up proxy tracking for a container.
 // Returns the proxy address to use as HTTP_PROXY.
 func (st *SpendingTracker) RegisterContainer(containerID string, budget int64, existingSpending int64) (string, error) {

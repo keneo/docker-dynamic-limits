@@ -105,6 +105,21 @@ func main() {
 	// Initialize enforcement manager
 	em := enforcement.NewManager(st, dc, cg, px, bus)
 
+	// Seed proxy spending from persisted store so incremental updates
+	// don't overwrite accumulated totals after a daemon restart.
+	if containers, err := st.ListContainers(); err == nil {
+		totals := make(map[string]int64)
+		for _, c := range containers {
+			if v, err := st.GetUsage(c.ID, model.LimitSpending); err == nil && v > 0 {
+				totals[c.ID] = v
+			}
+		}
+		if len(totals) > 0 {
+			px.SeedSpending(totals)
+			log.Printf("seeded spending for %d container(s) from store", len(totals))
+		}
+	}
+
 	// Start enforcement for all existing containers
 	if err := em.StartAll(); err != nil {
 		log.Printf("warning: failed to start enforcement for existing containers: %v", err)
