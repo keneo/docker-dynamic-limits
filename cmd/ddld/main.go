@@ -105,18 +105,18 @@ func main() {
 	// Initialize enforcement manager
 	em := enforcement.NewManager(st, dc, cg, px, bus)
 
-	// Seed proxy spending from persisted store so incremental updates
-	// don't overwrite accumulated totals after a daemon restart.
+	// Restore proxy listeners for existing containers so they keep their
+	// spending tracking and proxy addresses after a daemon restart.
 	if containers, err := st.ListContainers(); err == nil {
-		totals := make(map[string]int64)
 		for _, c := range containers {
-			if v, err := st.GetUsage(c.ID, model.LimitSpending); err == nil && v > 0 {
-				totals[c.ID] = v
+			budget, _ := st.GetLimit(c.ID, model.LimitSpending)
+			spending, _ := st.GetUsage(c.ID, model.LimitSpending)
+			addr, err := px.RegisterContainer(c.ID, budget, spending)
+			if err != nil {
+				log.Printf("warning: failed to restore proxy for %s: %v", c.ID, err)
+			} else {
+				log.Printf("[proxy] restored proxy for container %s on %s (spending: %d, budget: %d)", c.ID, addr, spending, budget)
 			}
-		}
-		if len(totals) > 0 {
-			px.SeedSpending(totals)
-			log.Printf("seeded spending for %d container(s) from store", len(totals))
 		}
 	}
 
