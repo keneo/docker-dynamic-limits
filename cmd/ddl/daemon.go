@@ -17,6 +17,45 @@ const (
 	daemonImageName     = "ddld:latest"
 )
 
+func logsCmd() *cobra.Command {
+	var follow bool
+	var tail string
+
+	cmd := &cobra.Command{
+		Use:   "logs",
+		Short: "Show ddld daemon logs",
+		Long: `Show logs from the ddl-daemon container.
+
+Examples:
+  ddl logs              Show all logs
+  ddl logs -f           Follow log output
+  ddl logs -n 50        Show last 50 lines
+  ddl logs -f -n 100    Follow, starting from last 100 lines`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			state, _ := inspectContainerState(daemonContainerName)
+			if state == "" {
+				return fmt.Errorf("ddl-daemon is not running")
+			}
+
+			dockerArgs := []string{"logs"}
+			if follow {
+				dockerArgs = append(dockerArgs, "-f")
+			}
+			if tail != "" {
+				dockerArgs = append(dockerArgs, "--tail", tail)
+			}
+			dockerArgs = append(dockerArgs, daemonContainerName)
+
+			return dockerExec(dockerArgs...)
+		},
+	}
+
+	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow log output")
+	cmd.Flags().StringVarP(&tail, "tail", "n", "", "Number of lines to show from the end")
+
+	return cmd
+}
+
 func daemonCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "daemon",

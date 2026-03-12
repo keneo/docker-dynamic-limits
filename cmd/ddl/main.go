@@ -128,6 +128,7 @@ Environment variables:
 	root.AddCommand(dashboardCmd())
 	root.AddCommand(configCmd())
 	root.AddCommand(daemonCmd())
+	root.AddCommand(logsCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

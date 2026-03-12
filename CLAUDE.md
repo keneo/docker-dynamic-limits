@@ -42,6 +42,8 @@ API: `GET /config` returns all config (keys masked), `PUT /config` accepts parti
 
 **Config persistence**: `PUT /config` changes are persisted to a JSON file (`config.json` in the same directory as the SQLite database). On daemon startup, persisted config is loaded and overlaid on environment variable defaults. Only explicitly set keys are persisted.
 
+**Disabled providers**: When a provider (Anthropic, OpenAI, Ollama) is disabled via config, requests from containers to that provider are blocked with HTTP 403 `{"error":"provider disabled in ddl proxy"}`. The check happens early in `proxyHandler` via `isDisabledProvider()` before any forwarding.
+
 ## System Sleep Handling
 
 When the host Mac sleeps (lid close), Docker Desktop's Linux VM suspends. The daemon detects this via wall-clock time gaps between enforcement ticks and takes corrective action:

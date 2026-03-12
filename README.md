@@ -99,6 +99,9 @@ ddl daemon start          # build image (first time) and start container
 ddl daemon start --build  # force rebuild of the image
 ddl daemon status         # check if running
 ddl daemon stop           # stop and remove container
+ddl logs                  # show daemon logs
+ddl logs -f               # follow daemon logs
+ddl logs -n 50            # show last 50 lines
 ```
 
 This starts ddld in a container named `ddl-daemon` with:
@@ -410,6 +413,14 @@ Request #1: "What is the tallest mountain on Earth? Answer in one sentence."
 ...
 Request #4: HTTP 429 — Budget exceeded!
 {"error":"spending budget exceeded"}
+```
+
+### Disabled providers
+
+When a provider is disabled (via `ddl config set <provider>-enabled false`), requests to that provider are blocked with HTTP 403:
+
+```json
+{"error":"provider disabled in ddl proxy"}
 ```
 
 ### Non-API traffic
