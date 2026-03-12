@@ -27,7 +27,7 @@ var configKeys = map[string]configKeyInfo{
 	"ollama-enabled":    {jsonKey: "ollama_enabled", keyType: "bool"},
 	"anthropic-key":     {jsonKey: "anthropic_key", keyType: "string"},
 	"openai-key":        {jsonKey: "openai_key", keyType: "string"},
-	"ollama-url":        {jsonKey: "ollama_url", keyType: "string", readOnly: true},
+	"ollama-url":        {jsonKey: "ollama_url", keyType: "string"},
 	"ollama-models":     {jsonKey: "ollama_models", keyType: "stringlist"},
 	"ollama-queue-size": {jsonKey: "ollama_queue_size", keyType: "int"},
 	"ollama-timeout":    {jsonKey: "ollama_timeout", keyType: "duration"},
@@ -110,12 +110,13 @@ Keys:
   ollama-enabled       bool     Enable/disable Ollama proxy
   anthropic-key        string   Anthropic API key
   openai-key           string   OpenAI API key
+  ollama-url           string   Ollama server URL
   ollama-models        list     Comma-separated model allowlist
   ollama-queue-size    int      Max queue size
   ollama-timeout       duration Request timeout (e.g. 2m, 120s)
   ollama-default-bid   int      Default bid in milli-cents/wall-sec
 
-Note: ollama-url cannot be changed at runtime (requires restart).`,
+Note: ollama-url changes take effect for the next queued request.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key, valueStr := args[0], args[1]

@@ -984,6 +984,15 @@ func (s *Server) applyConfig(st *proxy.SpendingTracker, req map[string]interface
 				return fmt.Errorf("ollama_default_bid: expected number")
 			}
 			s.ollama.SetDefaultBid(int64(n))
+		case "ollama_url":
+			if s.ollama == nil {
+				return fmt.Errorf("ollama not configured")
+			}
+			str, ok := val.(string)
+			if !ok {
+				return fmt.Errorf("ollama_url: expected string")
+			}
+			s.ollama.SetOllamaURL(str)
 		default:
 			return fmt.Errorf("unknown config key: %s", key)
 		}

@@ -452,6 +452,13 @@ func (q *Queue) SetDefaultBid(bid int64) {
 	q.cfg.DefaultBid = bid
 }
 
+// SetOllamaURL updates the Ollama server URL at runtime.
+func (q *Queue) SetOllamaURL(u string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.cfg.OllamaURL = u
+}
+
 // OllamaHost returns the host portion of the configured Ollama URL.
 func (q *Queue) OllamaHost() string {
 	u, err := url.Parse(q.cfg.OllamaURL)
@@ -503,7 +510,9 @@ func (q *Queue) popNext() *entry {
 }
 
 func (q *Queue) processEntry(e *entry) {
+	q.mu.Lock()
 	targetURL := q.cfg.OllamaURL + e.path
+	q.mu.Unlock()
 
 	req, err := http.NewRequestWithContext(e.ctx, http.MethodPost, targetURL, nil)
 	if err != nil {

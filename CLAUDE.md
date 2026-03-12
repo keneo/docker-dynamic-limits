@@ -32,7 +32,7 @@ The daemon supports runtime configuration via `ddl config get` / `ddl config set
 | `ollama-enabled` | bool | yes | Enable/disable Ollama proxy |
 | `anthropic-key` | string | yes | Masked in `config get` |
 | `openai-key` | string | yes | Masked in `config get` |
-| `ollama-url` | string | no | Read-only (requires restart) |
+| `ollama-url` | string | yes | Ollama server URL |
 | `ollama-models` | list | yes | Comma-separated in CLI |
 | `ollama-queue-size` | int | yes | |
 | `ollama-timeout` | duration | yes | e.g. `2m`, `120s` |
