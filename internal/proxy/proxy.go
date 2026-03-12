@@ -224,8 +224,32 @@ func (st *SpendingTracker) isOllamaHost(host string) bool {
 	return stripPort(host) == st.ollamaQueue.OllamaHost()
 }
 
+// isDisabledProvider returns true if the host is a known provider that is explicitly disabled.
+func (st *SpendingTracker) isDisabledProvider(host string) bool {
+	h := stripPort(host)
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	// Check cloud API hosts
+	if IsTrackedAPIHost(h) {
+		if len(st.enabledHosts) > 0 && !st.enabledHosts[h] {
+			return true
+		}
+	}
+	// Check Ollama host
+	if st.ollamaQueue != nil && h == st.ollamaQueue.OllamaHost() && !st.enabledHosts["ollama"] {
+		return true
+	}
+	return false
+}
+
 func (st *SpendingTracker) proxyHandler(containerID string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Block requests to disabled providers
+		if st.isDisabledProvider(r.Host) {
+			http.Error(w, `{"error":"provider disabled in ddl proxy"}`, http.StatusForbidden)
+			return
+		}
+
 		// Dispatch Ollama requests to the queue handler
 		if st.isOllamaHost(r.Host) {
 			st.mu.RLock()
