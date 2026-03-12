@@ -69,11 +69,13 @@ cgroup filesystem for enforcement.
 Subcommands:
   start    Build image (if needed) and start the daemon container
   stop     Stop and remove the daemon container
+  restart  Rebuild image while running, then swap (minimal downtime)
   status   Show whether the daemon is running and its uptime`,
 	}
 
 	cmd.AddCommand(daemonStartCmd())
 	cmd.AddCommand(daemonStopCmd())
+	cmd.AddCommand(daemonRestartCmd())
 	cmd.AddCommand(daemonStatusCmd())
 
 	return cmd
@@ -125,81 +127,12 @@ Examples:
 
 			// Build image if needed or forced
 			if forceBuild || !imageExists(daemonImageName) {
-				fmt.Println("Building ddld image...")
-				buildCmd := exec.Command("docker", "build", "-t", daemonImageName, ".")
-				buildCmd.Stdout = os.Stdout
-				buildCmd.Stderr = os.Stderr
-				if err := buildCmd.Run(); err != nil {
-					return fmt.Errorf("docker build failed: %w", err)
+				if err := buildImage(); err != nil {
+					return err
 				}
 			}
 
-			// Ensure host socket directory exists
-			os.MkdirAll("/var/run/ddl", 0755)
-
-			// Run container
-			fmt.Println("Starting ddl-daemon...")
-			runArgs := []string{"run", "-d",
-				"--name", daemonContainerName,
-				"--pid=host",
-				"-v", "ddl-data:/data",
-				"-v", "/sys/fs/cgroup:/sys/fs/cgroup:ro",
-				"-v", "/var/run/docker.sock:/var/run/docker.sock",
-				"-v", "/var/run/ddl:/run/ddl",
-				"-p", fmt.Sprintf("%d:7123", port),
-			}
-
-			// Forward env vars to daemon container
-			for _, envVar := range []string{
-				"DDL_ANTHROPIC_API_KEY", "DDL_OPENAI_API_KEY",
-				"DDL_OLLAMA_URL", "DDL_OLLAMA_MODELS", "DDL_OLLAMA_MAX_QUEUE",
-				"DDL_OLLAMA_TIMEOUT", "DDL_OLLAMA_DEFAULT_BID",
-				"DDL_ENABLE_OPENAI", "DDL_ENABLE_ANTHROPIC", "DDL_ENABLE_OLLAMA",
-			} {
-				if val := os.Getenv(envVar); val != "" {
-					runArgs = append(runArgs, "-e", envVar+"="+val)
-				}
-			}
-
-			runArgs = append(runArgs, daemonImageName,
-				"-db", "/data/ddl.db",
-				"-sock", "/run/ddl/ddl.sock",
-			)
-			out, err := dockerOutput(runArgs...)
-			if err != nil {
-				return fmt.Errorf("docker run failed: %w", err)
-			}
-			containerID := strings.TrimSpace(out)
-			if len(containerID) > 12 {
-				containerID = containerID[:12]
-			}
-
-			// Wait for readiness (up to 3 seconds)
-			// Check both TCP and socket file
-			url := fmt.Sprintf("http://localhost:%d/containers", port)
-			ready := false
-			for i := 0; i < 6; i++ {
-				time.Sleep(500 * time.Millisecond)
-				resp, err := http.Get(url)
-				if err == nil {
-					resp.Body.Close()
-					// Also check that the socket file appeared
-					if _, serr := os.Stat("/var/run/ddl/ddl.sock"); serr == nil {
-						ready = true
-						break
-					}
-					ready = true // TCP is up, socket may take a moment
-					break
-				}
-			}
-
-			if ready {
-				fmt.Printf("ddl-daemon started (container %s)\n", containerID)
-				runOnRestartHooks()
-			} else {
-				fmt.Printf("ddl-daemon started (container %s) but not yet responding on port %d\n", containerID, port)
-			}
-			return nil
+			return startDaemonContainer(port)
 		},
 	}
 
@@ -215,26 +148,154 @@ func daemonStopCmd() *cobra.Command {
 		Short: "Stop the ddld daemon container",
 		Long:  `Stop and remove the ddl-daemon container. Data is preserved on the ddl-data Docker volume.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			state, _ := inspectContainerState(daemonContainerName)
-			if state == "" {
-				fmt.Println("ddl-daemon is not running")
-				return nil
-			}
+			return stopDaemon()
+		},
+	}
+}
 
-			if state == "running" {
-				if _, err := dockerOutput("stop", daemonContainerName); err != nil {
-					return fmt.Errorf("docker stop failed: %w", err)
+func stopDaemon() error {
+	state, _ := inspectContainerState(daemonContainerName)
+	if state == "" {
+		fmt.Println("ddl-daemon is not running")
+		return nil
+	}
+
+	if state == "running" {
+		if _, err := dockerOutput("stop", daemonContainerName); err != nil {
+			return fmt.Errorf("docker stop failed: %w", err)
+		}
+	}
+
+	if _, err := dockerOutput("rm", daemonContainerName); err != nil {
+		return fmt.Errorf("docker rm failed: %w", err)
+	}
+
+	fmt.Println("ddl-daemon stopped")
+	return nil
+}
+
+func buildImage() error {
+	fmt.Println("Building ddld image...")
+	buildCmd := exec.Command("docker", "build", "-t", daemonImageName, ".")
+	buildCmd.Stdout = os.Stdout
+	buildCmd.Stderr = os.Stderr
+	if err := buildCmd.Run(); err != nil {
+		return fmt.Errorf("docker build failed: %w", err)
+	}
+	return nil
+}
+
+func startDaemonContainer(port int) error {
+	// Ensure host socket directory exists
+	os.MkdirAll("/var/run/ddl", 0755)
+
+	// Run container
+	fmt.Println("Starting ddl-daemon...")
+	runArgs := []string{"run", "-d",
+		"--name", daemonContainerName,
+		"--pid=host",
+		"-v", "ddl-data:/data",
+		"-v", "/sys/fs/cgroup:/sys/fs/cgroup:ro",
+		"-v", "/var/run/docker.sock:/var/run/docker.sock",
+		"-v", "/var/run/ddl:/run/ddl",
+		"-p", fmt.Sprintf("%d:7123", port),
+	}
+
+	// Forward env vars to daemon container
+	for _, envVar := range []string{
+		"DDL_ANTHROPIC_API_KEY", "DDL_OPENAI_API_KEY",
+		"DDL_OLLAMA_URL", "DDL_OLLAMA_MODELS", "DDL_OLLAMA_MAX_QUEUE",
+		"DDL_OLLAMA_TIMEOUT", "DDL_OLLAMA_DEFAULT_BID",
+		"DDL_ENABLE_OPENAI", "DDL_ENABLE_ANTHROPIC", "DDL_ENABLE_OLLAMA",
+	} {
+		if val := os.Getenv(envVar); val != "" {
+			runArgs = append(runArgs, "-e", envVar+"="+val)
+		}
+	}
+
+	runArgs = append(runArgs, daemonImageName,
+		"-db", "/data/ddl.db",
+		"-sock", "/run/ddl/ddl.sock",
+	)
+	out, err := dockerOutput(runArgs...)
+	if err != nil {
+		return fmt.Errorf("docker run failed: %w", err)
+	}
+	containerID := strings.TrimSpace(out)
+	if len(containerID) > 12 {
+		containerID = containerID[:12]
+	}
+
+	// Wait for readiness (up to 3 seconds)
+	url := fmt.Sprintf("http://localhost:%d/containers", port)
+	ready := false
+	for i := 0; i < 6; i++ {
+		time.Sleep(500 * time.Millisecond)
+		resp, err := http.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			if _, serr := os.Stat("/var/run/ddl/ddl.sock"); serr == nil {
+				ready = true
+				break
+			}
+			ready = true
+			break
+		}
+	}
+
+	if ready {
+		fmt.Printf("ddl-daemon started (container %s)\n", containerID)
+		runOnRestartHooks()
+	} else {
+		fmt.Printf("ddl-daemon started (container %s) but not yet responding on port %d\n", containerID, port)
+	}
+	return nil
+}
+
+func daemonRestartCmd() *cobra.Command {
+	var forceBuild bool
+	var port int
+
+	cmd := &cobra.Command{
+		Use:   "restart",
+		Short: "Restart the daemon with minimal downtime",
+		Long: `Restart the ddld daemon container. With --build, the image is rebuilt
+while the current daemon is still running, then the old container is
+swapped for the new one. This minimizes downtime to just the container
+swap (~1-2 seconds) instead of including the full build (~30 seconds).
+
+Without --build, the existing image is reused (container restart only).
+
+Examples:
+  ddl daemon restart          # restart with current image
+  ddl daemon restart --build  # rebuild image first, then swap`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Build first while old daemon keeps running
+			if forceBuild {
+				if err := buildImage(); err != nil {
+					return err
 				}
 			}
 
-			if _, err := dockerOutput("rm", daemonContainerName); err != nil {
-				return fmt.Errorf("docker rm failed: %w", err)
+			// Now stop and swap
+			state, _ := inspectContainerState(daemonContainerName)
+			if state != "" {
+				if state == "running" {
+					if _, err := dockerOutput("stop", daemonContainerName); err != nil {
+						return fmt.Errorf("docker stop failed: %w", err)
+					}
+				}
+				dockerOutput("rm", "-f", daemonContainerName)
 			}
 
-			fmt.Println("ddl-daemon stopped")
-			return nil
+			return startDaemonContainer(port)
 		},
 	}
+
+	cmd.Flags().BoolVar(&forceBuild, "build", false, "Rebuild the ddld image before restarting")
+	cmd.Flags().IntVar(&port, "port", 7123, "Host port to expose the API on")
+
+	return cmd
 }
 
 func daemonStatusCmd() *cobra.Command {

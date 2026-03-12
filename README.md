@@ -97,6 +97,8 @@ The recommended way to run ddld is as a Docker container:
 ```bash
 ddl daemon start          # build image (first time) and start container
 ddl daemon start --build  # force rebuild of the image
+ddl daemon restart        # restart with current image
+ddl daemon restart --build  # rebuild while running, then swap (minimal downtime)
 ddl daemon status         # check if running
 ddl daemon stop           # stop and remove container
 ddl logs                  # show daemon logs
