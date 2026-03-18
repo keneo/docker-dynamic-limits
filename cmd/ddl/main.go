@@ -130,6 +130,10 @@ Environment variables:
 	root.AddCommand(daemonCmd())
 	root.AddCommand(logsCmd())
 	root.AddCommand(hooksCmd())
+	root.AddCommand(freezeCmd())
+	root.AddCommand(unfreezeCmd())
+	root.AddCommand(freezeAllCmd())
+	root.AddCommand(unfreezeAllCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -565,6 +569,145 @@ Examples:
 					fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t, formatValue(t, int64(u)), formatValue(t, int64(l)), status)
 				}
 				w.Flush()
+			}
+			return nil
+		},
+	}
+}
+
+func freezeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "freeze <container>",
+		Short: "Freeze a container (pause + suspend byte-second accumulators)",
+		Long: `Freeze a container: Docker-pauses the container and suspends all
+byte-second accumulator tracking. This is different from enforcement
+pause — a frozen container does not consume lifetime.
+
+Suspended accumulators:
+  ram-usage-bsec, disk-usage-bsec, ram-request-bsec, disk-request-bsec
+
+If the container is already enforcement-paused, only the frozen flag is
+set (the container is already Docker-paused). Enforcement release will
+NOT Docker-unpause a frozen container.
+
+Any pending Ollama inference requests for this container are cancelled.
+
+Examples:
+  ddl freeze my-container
+  ddl freeze creature-ollie`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiPost(fmt.Sprintf("/containers/%s/freeze", args[0]), nil)
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return printJSON(resp)
+			}
+			fmt.Printf("Container %s frozen\n", args[0])
+			return nil
+		},
+	}
+}
+
+func unfreezeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unfreeze <container>",
+		Short: "Unfreeze a container (resume byte-second accumulators)",
+		Long: `Unfreeze a container: resumes byte-second accumulator tracking and
+Docker-unpauses the container — unless enforcement is still holding it
+paused (e.g. CPU or disk limit exceeded).
+
+If enforcement is still active, the container stays Docker-paused but
+byte-second accumulators resume. A warning is printed.
+
+Unfreeze does NOT override enforcement pause.
+
+Examples:
+  ddl unfreeze my-container
+  ddl unfreeze creature-ollie`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiPost(fmt.Sprintf("/containers/%s/unfreeze", args[0]), nil)
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return printJSON(resp)
+			}
+			fmt.Printf("Container %s unfrozen\n", args[0])
+			if ea, ok := resp["enforcement_active"]; ok && ea == true {
+				fmt.Println("Warning: enforcement is still active — container remains Docker-paused")
+			}
+			return nil
+		},
+	}
+}
+
+func freezeAllCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "freeze-all",
+		Short: "Freeze all managed containers",
+		Long: `Freeze all managed containers. Each container is Docker-paused and
+its byte-second accumulators are suspended.
+
+Examples:
+  ddl freeze-all`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiPost("/freeze-all", nil)
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return printJSON(resp)
+			}
+			if results, ok := resp["results"].([]interface{}); ok {
+				for _, r := range results {
+					if m, ok := r.(map[string]interface{}); ok {
+						name := m["name"]
+						if name == nil || name == "" {
+							name = m["id"]
+						}
+						fmt.Printf("%s: %s\n", name, m["status"])
+					}
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func unfreezeAllCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unfreeze-all",
+		Short: "Unfreeze all managed containers",
+		Long: `Unfreeze all managed containers. Byte-second accumulators resume.
+Containers that are still enforcement-paused remain Docker-paused.
+
+Examples:
+  ddl unfreeze-all`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiPost("/unfreeze-all", nil)
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return printJSON(resp)
+			}
+			if results, ok := resp["results"].([]interface{}); ok {
+				for _, r := range results {
+					if m, ok := r.(map[string]interface{}); ok {
+						name := m["name"]
+						if name == nil || name == "" {
+							name = m["id"]
+						}
+						status := m["status"]
+						if ea, ok := m["enforcement_active"]; ok && ea == true {
+							status = fmt.Sprintf("%s (enforcement still active)", status)
+						}
+						fmt.Printf("%s: %s\n", name, status)
+					}
+				}
 			}
 			return nil
 		},

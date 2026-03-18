@@ -29,6 +29,8 @@ type DataStore interface {
 	SetGlobalLimit(limitType model.LimitType, value int64) error
 	GetGlobalLimit(limitType model.LimitType) (int64, error)
 	GetAllGlobalLimits() (map[model.LimitType]int64, error)
+	SetFrozen(containerID string, frozen bool) error
+	IsFrozen(containerID string) (bool, error)
 }
 
 // Store provides persistent storage for container registrations, limits, and usage.
@@ -83,6 +85,10 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("exec %q: %w", stmt[:40], err)
 		}
 	}
+
+	// Add frozen column (ignore error if already exists)
+	s.db.Exec(`ALTER TABLE containers ADD COLUMN frozen INTEGER NOT NULL DEFAULT 0`)
+
 	return nil
 }
 
@@ -361,4 +367,27 @@ func (s *Store) GetAllGlobalLimits() (map[model.LimitType]int64, error) {
 		result[model.LimitType(t)] = v
 	}
 	return result, rows.Err()
+}
+
+// SetFrozen sets the frozen state for a container.
+func (s *Store) SetFrozen(containerID string, frozen bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	val := 0
+	if frozen {
+		val = 1
+	}
+	_, err := s.db.Exec(`UPDATE containers SET frozen = ? WHERE id = ?`, val, containerID)
+	return err
+}
+
+// IsFrozen returns whether a container is frozen.
+func (s *Store) IsFrozen(containerID string) (bool, error) {
+	row := s.db.QueryRow(`SELECT frozen FROM containers WHERE id = ?`, containerID)
+	var val int
+	if err := row.Scan(&val); err != nil {
+		return false, err
+	}
+	return val != 0, nil
 }

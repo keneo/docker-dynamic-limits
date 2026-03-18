@@ -310,6 +310,7 @@ func (q *Queue) HandleRequest(containerID string, w http.ResponseWriter, r *http
 }
 
 // SetBid sets the standing bid for a container and re-sorts pending entries.
+// The bid is persisted to the store so it survives daemon restarts.
 func (q *Queue) SetBid(containerID string, bid int64) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -321,6 +322,10 @@ func (q *Queue) SetBid(containerID string, bid int64) {
 		}
 	}
 	q.sortEntries()
+	// Persist to store
+	if q.store != nil {
+		q.store.SetUsage(containerID, "ollama-bid", bid)
+	}
 	if q.bus != nil {
 		q.bus.PublishData(events.OllamaBidChange, containerID, events.OllamaBidChangeData{Bid: bid})
 	}
@@ -331,6 +336,22 @@ func (q *Queue) GetBid(containerID string) int64 {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return q.bids[containerID]
+}
+
+// RestoreBids loads persisted bids from the store for the given containers.
+func (q *Queue) RestoreBids(containerIDs []string) {
+	if q.store == nil {
+		return
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, id := range containerIDs {
+		bid, err := q.store.GetUsage(id, "ollama-bid")
+		if err == nil && bid > 0 {
+			q.bids[id] = bid
+			log.Printf("[ollama] restored bid for %s: %d milli-cents/wall-sec", id, bid)
+		}
+	}
 }
 
 // CancelEntry cancels a pending entry for a container.
@@ -349,6 +370,35 @@ func (q *Queue) CancelEntry(containerID string) bool {
 		}
 	}
 	return false
+}
+
+// CancelAllPending cancels all pending entries and the active request for a container,
+// but keeps the standing bid (unlike RemoveContainer which also removes the bid).
+func (q *Queue) CancelAllPending(containerID string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	// Cancel pending entries
+	remaining := q.entries[:0]
+	for _, e := range q.entries {
+		if e.containerID == containerID {
+			if atomic.CompareAndSwapInt32(&e.cancelled, 0, 1) {
+				e.cancel()
+				e.resultCh <- &result{err: fmt.Errorf("container frozen")}
+				if q.bus != nil {
+					q.bus.PublishData(events.OllamaCancel, containerID, events.OllamaCancelData{Reason: "frozen"})
+				}
+			}
+		} else {
+			remaining = append(remaining, e)
+		}
+	}
+	q.entries = remaining
+
+	// Cancel active request if it's for this container
+	if q.active != nil && q.active.containerID == containerID {
+		q.active.cancel()
+	}
 }
 
 // RemoveContainer cancels pending entries, removes bid, discards active if being processed.

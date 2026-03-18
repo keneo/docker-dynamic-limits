@@ -31,6 +31,8 @@ Event types:
   enforcement_change  Enforcement was applied or released
   container_register  A new container was registered
   container_remove    A container was removed from management
+  container_frozen    A container was frozen (paused + byte-sec suspended)
+  container_unfrozen  A container was unfrozen
   ollama_enqueue      An Ollama inference request was queued
   ollama_dequeue      An Ollama inference request completed
   ollama_cancel       An Ollama inference request was cancelled
@@ -221,6 +223,19 @@ Use --sock or DDL_SOCK to connect via unix socket, or --api to connect via TCP.`
 					}
 					if json.Unmarshal(evt.Data, &d) == nil {
 						fmt.Printf("  duration=%.1fs\n", d.DurationSeconds)
+					}
+				case "container_frozen":
+					fmt.Println("  frozen (byte-sec accumulators suspended)")
+				case "container_unfrozen":
+					var d struct {
+						EnforcementActive bool `json:"enforcement_active"`
+					}
+					if json.Unmarshal(evt.Data, &d) == nil {
+						if d.EnforcementActive {
+							fmt.Println("  unfrozen (enforcement still active)")
+						} else {
+							fmt.Println("  unfrozen")
+						}
 					}
 				}
 				fmt.Println()

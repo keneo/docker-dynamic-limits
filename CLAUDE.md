@@ -57,6 +57,25 @@ API: `GET /containers/{id}/activity` returns `[]ProxyActivity`. Activity is also
 
 CLI users can register shell commands that run on the host after every `ddl daemon start`. Managed via `ddl hooks add/list/remove`. Stored locally in `~/.config/ddl/hooks.json`. Executed sequentially via `sh -c` after daemon readiness check in `daemonStartCmd()`. Failed hooks warn but don't abort.
 
+## Container Freeze
+
+User-initiated freeze/unfreeze for pausing container lifetime. "Freeze" is distinct from Docker's `pause` and enforcement's pause.
+
+**Frozen = all 4 byte-second accumulators suspended**: `ram-usage-bsec`, `disk-usage-bsec`, `ram-request-bsec`, `disk-request-bsec`. Only user-freeze suspends these — enforcement-pause does NOT.
+
+**Freeze vs enforcement-pause interaction:**
+
+| Scenario | Behavior |
+|---|---|
+| Freeze running container | Docker pause + set frozen flag + suspend byte-sec |
+| Freeze enforcement-paused container | Just set frozen flag (already Docker-paused) |
+| Enforcement pauses frozen container | Just set enforced flag (already Docker-paused) |
+| Enforcement releases on frozen container | Clear enforced flag, DON'T Docker-unpause |
+| Unfreeze during enforcement-pause | Clear frozen flag, resume byte-sec, container stays Docker-paused |
+| Unfreeze with no enforcement active | Docker unpause + clear frozen flag + resume byte-sec |
+
+**Implementation:** `frozen` column in SQLite, `frozen` map in `enforcement.Manager`, `isOtherPauseActive()` returns true when frozen. CLI: `ddl freeze/unfreeze/freeze-all/unfreeze-all`. API: `POST /containers/{id}/freeze`, `POST /containers/{id}/unfreeze`, `POST /freeze-all`, `POST /unfreeze-all`. Events: `container_frozen`, `container_unfrozen`. Ollama: `CancelAllPending()` on freeze cancels pending+active requests but keeps bid.
+
 ## System Sleep Handling
 
 When the host Mac sleeps (lid close), Docker Desktop's Linux VM suspends. The daemon detects this via wall-clock time gaps between enforcement ticks and takes corrective action:

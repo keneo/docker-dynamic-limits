@@ -251,6 +251,32 @@ ddl dashboard stop        # stop the dashboard
 
 The dashboard shows all containers with their limits, usage, and enforcement status. You can register, clone, remove containers and set limits directly from the UI. An offline banner appears when the daemon is unreachable.
 
+## Container freeze
+
+Freeze all containers to pause time-based billing while debugging or going offline. A frozen container is Docker-paused **and** its byte-second accumulators stop — the creature doesn't lose lifetime.
+
+```bash
+ddl freeze creature-ollie        # freeze one container
+ddl freeze-all                   # freeze all managed containers
+ddl unfreeze creature-ollie      # unfreeze one container
+ddl unfreeze-all                 # unfreeze all managed containers
+```
+
+Suspended accumulators: `ram-usage-bsec`, `disk-usage-bsec`, `ram-request-bsec`, `disk-request-bsec`.
+
+**Freeze vs enforcement-pause:** Freeze is a user action; enforcement-pause is automatic when a limit is exceeded. They interact as follows:
+
+| Scenario | Behavior |
+|---|---|
+| Freeze a running container | Docker pause + set frozen flag + suspend byte-sec |
+| Freeze an enforcement-paused container | Just set frozen flag (already Docker-paused) |
+| Enforcement pauses a frozen container | Just set enforced flag (already Docker-paused) |
+| Enforcement releases on frozen container | Clear enforced flag, container stays Docker-paused |
+| Unfreeze during enforcement-pause | Clear frozen flag, resume byte-sec, container stays Docker-paused |
+| Unfreeze with no enforcement active | Docker unpause + clear frozen flag + resume byte-sec |
+
+API endpoints: `POST /containers/{id}/freeze`, `POST /containers/{id}/unfreeze`, `POST /freeze-all`, `POST /unfreeze-all`.
+
 ## Daemon restart hooks
 
 Register shell commands that run automatically on the host after every `ddl daemon start`:
@@ -308,6 +334,10 @@ The daemon exposes two interfaces:
 | `GET` | `/containers/{id}/usage` | Get current usage |
 | `GET` | `/containers/{id}/activity` | Get recent proxy activity (last 20 requests) |
 | `POST` | `/containers/{id}/clone` | Clone container with limits |
+| `POST` | `/containers/{id}/freeze` | Freeze container (pause + suspend byte-sec) |
+| `POST` | `/containers/{id}/unfreeze` | Unfreeze container |
+| `POST` | `/freeze-all` | Freeze all managed containers |
+| `POST` | `/unfreeze-all` | Unfreeze all managed containers |
 | `GET` | `/usage` | In-container usage self-query |
 | `GET` | `/limits` | In-container limits self-query |
 | `GET` | `/events` | WebSocket event stream (query: `container_id`, `types`) |

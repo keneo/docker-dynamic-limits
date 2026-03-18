@@ -57,6 +57,7 @@ type ContainerStatus struct {
 	Enforced  map[LimitType]bool     `json:"enforced"`    // true if limit is currently being enforced (paused/blocked)
 	State     string                 `json:"state"`        // "running", "paused", "exited", "deleted"
 	ProxyAddr string                 `json:"proxy_addr,omitempty"` // spending proxy address for this container
+	Frozen    bool                   `json:"frozen"`       // true if container is user-frozen
 }
 
 // EnforcementAction represents what to do when a limit is exceeded.

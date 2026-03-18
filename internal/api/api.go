@@ -83,6 +83,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/config", s.handleConfig)
 	// Global limits
 	s.mux.HandleFunc("/global-limits", s.handleGlobalLimits)
+	// Freeze/unfreeze bulk operations
+	s.mux.HandleFunc("/freeze-all", s.handleFreezeAll)
+	s.mux.HandleFunc("/unfreeze-all", s.handleUnfreezeAll)
 }
 
 // Handler returns the HTTP handler (full API).
@@ -317,6 +320,10 @@ func (s *Server) handleContainer(w http.ResponseWriter, r *http.Request) {
 		s.handleOllamaCancelForContainer(w, r, containerID)
 	case sub == "activity":
 		s.handleActivity(w, r, containerID)
+	case sub == "freeze":
+		s.handleFreeze(w, r, containerID)
+	case sub == "unfreeze":
+		s.handleUnfreeze(w, r, containerID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -356,13 +363,14 @@ func (s *Server) handleContainerInfo(w http.ResponseWriter, r *http.Request, con
 		activity = s.proxy.GetActivity(containerID)
 	}
 	writeJSON(w, map[string]interface{}{
-		"container": status.Container,
-		"limits":    status.Limits,
-		"usage":     status.Usage,
-		"enforced":  status.Enforced,
-		"state":     status.State,
+		"container":  status.Container,
+		"limits":     status.Limits,
+		"usage":      status.Usage,
+		"enforced":   status.Enforced,
+		"state":      status.State,
 		"proxy_addr": status.ProxyAddr,
-		"activity":  activity,
+		"frozen":     status.Frozen,
+		"activity":   activity,
 	})
 }
 
@@ -738,6 +746,7 @@ func (s *Server) buildStatus(c model.Container) model.ContainerStatus {
 		Enforced:  enforced,
 		State:     state,
 		ProxyAddr: proxyAddr,
+		Frozen:    s.enforcement.IsFrozen(c.ID),
 	}
 }
 
@@ -1080,6 +1089,96 @@ func (s *Server) LoadPersistedConfig() {
 	} else {
 		log.Printf("[api] loaded persisted config from %s", s.configPath)
 	}
+}
+
+// --- Freeze/Unfreeze ---
+
+func (s *Server) handleFreeze(w http.ResponseWriter, r *http.Request, containerID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := s.enforcement.Freeze(containerID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if s.ollama != nil {
+		s.ollama.CancelAllPending(containerID)
+	}
+	writeJSON(w, map[string]string{"status": "frozen"})
+}
+
+func (s *Server) handleUnfreeze(w http.ResponseWriter, r *http.Request, containerID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	enforcementActive, err := s.enforcement.Unfreeze(containerID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"status":             "unfrozen",
+		"enforcement_active": enforcementActive,
+	})
+}
+
+func (s *Server) handleFreezeAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	containers, err := s.store.ListContainers()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	var results []map[string]interface{}
+	for _, c := range containers {
+		err := s.enforcement.Freeze(c.ID)
+		entry := map[string]interface{}{
+			"id":     c.ID,
+			"name":   c.Name,
+			"status": "frozen",
+		}
+		if err != nil {
+			entry["status"] = "error"
+			entry["error"] = err.Error()
+		} else if s.ollama != nil {
+			s.ollama.CancelAllPending(c.ID)
+		}
+		results = append(results, entry)
+	}
+	writeJSON(w, map[string]interface{}{"results": results})
+}
+
+func (s *Server) handleUnfreezeAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	containers, err := s.store.ListContainers()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	var results []map[string]interface{}
+	for _, c := range containers {
+		enforcementActive, err := s.enforcement.Unfreeze(c.ID)
+		entry := map[string]interface{}{
+			"id":                 c.ID,
+			"name":               c.Name,
+			"status":             "unfrozen",
+			"enforcement_active": enforcementActive,
+		}
+		if err != nil {
+			entry["status"] = "error"
+			entry["error"] = err.Error()
+		}
+		results = append(results, entry)
+	}
+	writeJSON(w, map[string]interface{}{"results": results})
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {

@@ -26,6 +26,9 @@ type EnforcementController interface {
 	StartGlobalEnforcement()
 	IsGlobalEnforced(lt model.LimitType) bool
 	GetGlobalEnforced() map[model.LimitType]bool
+	Freeze(containerID string) error
+	Unfreeze(containerID string) (enforcementActive bool, err error)
+	IsFrozen(containerID string) bool
 }
 
 // Manager manages enforcement goroutines for all registered containers.
@@ -40,6 +43,8 @@ type Manager struct {
 	mu             sync.Mutex
 	workers        map[string]context.CancelFunc // containerID -> cancel func
 	enforced       map[string]map[model.LimitType]bool
+	frozen         map[string]bool // containerID -> frozen state
+	dockerIDs      map[string]string // containerID -> dockerID (for freeze/unfreeze)
 	globalEnforced map[model.LimitType]bool
 	globalCancel   context.CancelFunc
 	lastSleepEmit  time.Time // dedup sleep events across containers
@@ -56,6 +61,8 @@ func NewManager(st store.DataStore, dc docker.DockerClient, cg cgroup.CgroupRead
 		interval:       time.Second,
 		workers:        make(map[string]context.CancelFunc),
 		enforced:       make(map[string]map[model.LimitType]bool),
+		frozen:         make(map[string]bool),
+		dockerIDs:      make(map[string]string),
 		globalEnforced: make(map[model.LimitType]bool),
 	}
 }
@@ -70,6 +77,11 @@ func (m *Manager) StartContainer(containerID string, dockerID string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.workers[containerID] = cancel
 	m.enforced[containerID] = make(map[model.LimitType]bool)
+	m.dockerIDs[containerID] = dockerID
+	// Load frozen state from store
+	if isFrozen, err := m.store.IsFrozen(containerID); err == nil {
+		m.frozen[containerID] = isFrozen
+	}
 	m.mu.Unlock()
 
 	go m.enforcementLoop(ctx, containerID, dockerID)
@@ -84,6 +96,8 @@ func (m *Manager) StopContainer(containerID string) {
 		cancel()
 		delete(m.workers, containerID)
 		delete(m.enforced, containerID)
+		delete(m.frozen, containerID)
+		delete(m.dockerIDs, containerID)
 		log.Printf("[enforcement] stopped monitoring container %s", containerID)
 	}
 }
@@ -173,9 +187,10 @@ func (m *Manager) checkAndEnforce(ctx context.Context, containerID, dockerID str
 			// Don't accumulate if already enforced (container killed)
 			m.mu.Lock()
 			wasEnforced := m.enforced[containerID][lt]
+			isFrozen := m.frozen[containerID]
 			m.mu.Unlock()
 
-			if !wasEnforced && !slept {
+			if !wasEnforced && !slept && !isFrozen {
 				source := m.getByteSecondSource(ctx, containerID, dockerID, lt, limits, cgroupPath, cgroupErr)
 				m.store.AddUsage(containerID, lt, source)
 			}
@@ -205,6 +220,16 @@ func (m *Manager) checkAndEnforce(ctx context.Context, containerID, dockerID str
 			if m.isActuallyEnforced(ctx, dockerID, lt) {
 				m.release(ctx, containerID, dockerID, lt, cgroupPath)
 			}
+		}
+	}
+
+	// Always sync spending from proxy to store, even when no per-container
+	// spending limit is set. This ensures global spending totals are correct
+	// and spending survives daemon restarts.
+	if m.proxy != nil {
+		spending := m.proxy.GetSpending(containerID)
+		if spending > 0 {
+			m.store.SetUsage(containerID, model.LimitSpending, spending)
 		}
 	}
 
@@ -510,10 +535,14 @@ func (m *Manager) isActuallyEnforced(ctx context.Context, dockerID string, lt mo
 }
 
 // isOtherPauseActive checks if another limit type that uses pause is also enforced,
-// including global enforcement.
+// including global enforcement and user freeze.
 func (m *Manager) isOtherPauseActive(containerID string, except model.LimitType) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Frozen containers must stay Docker-paused
+	if m.frozen[containerID] {
+		return true
+	}
 	pauseTypes := []model.LimitType{model.LimitCPU, model.LimitDisk}
 	for _, lt := range pauseTypes {
 		if lt != except && m.enforced[containerID][lt] {
@@ -697,4 +726,111 @@ func (m *Manager) StopAll() {
 		m.globalCancel()
 		m.globalCancel = nil
 	}
+}
+
+// Freeze freezes a container: Docker-pauses it (if not already paused) and
+// suspends all byte-second accumulators. Persists to store.
+func (m *Manager) Freeze(containerID string) error {
+	m.mu.Lock()
+	dockerID := m.dockerIDs[containerID]
+	alreadyFrozen := m.frozen[containerID]
+	m.mu.Unlock()
+
+	if dockerID == "" {
+		return fmt.Errorf("container %s not tracked by enforcement", containerID)
+	}
+	if alreadyFrozen {
+		return nil
+	}
+
+	// Docker pause (ignore "already paused" errors)
+	ctx := context.Background()
+	if err := m.docker.PauseContainer(ctx, dockerID); err != nil {
+		if !strings.Contains(err.Error(), "already paused") {
+			return fmt.Errorf("docker pause: %w", err)
+		}
+	}
+
+	// Persist and set in-memory state
+	if err := m.store.SetFrozen(containerID, true); err != nil {
+		return fmt.Errorf("persist frozen: %w", err)
+	}
+	m.mu.Lock()
+	m.frozen[containerID] = true
+	m.mu.Unlock()
+
+	log.Printf("[enforcement] frozen container %s", containerID)
+	if m.bus != nil {
+		m.bus.PublishData(events.ContainerFrozen, containerID, events.ContainerFrozenData{})
+	}
+	return nil
+}
+
+// Unfreeze unfreezes a container: resumes byte-second accumulators and
+// Docker-unpauses the container unless enforcement is still holding it paused.
+// Returns true if enforcement is still active (container stays Docker-paused).
+func (m *Manager) Unfreeze(containerID string) (enforcementActive bool, err error) {
+	m.mu.Lock()
+	dockerID := m.dockerIDs[containerID]
+	wasFrozen := m.frozen[containerID]
+	m.mu.Unlock()
+
+	if dockerID == "" {
+		return false, fmt.Errorf("container %s not tracked by enforcement", containerID)
+	}
+	if !wasFrozen {
+		return false, nil
+	}
+
+	// Clear frozen state first (so isOtherPauseActive won't see it)
+	if err := m.store.SetFrozen(containerID, false); err != nil {
+		return false, fmt.Errorf("persist unfrozen: %w", err)
+	}
+	m.mu.Lock()
+	m.frozen[containerID] = false
+
+	// Check if any enforcement-pause is still holding the container
+	anyEnforced := false
+	pauseTypes := []model.LimitType{model.LimitCPU, model.LimitDisk}
+	for _, lt := range pauseTypes {
+		if m.enforced[containerID][lt] {
+			anyEnforced = true
+			break
+		}
+	}
+	// Also check global enforcement pause
+	if !anyEnforced {
+		for _, lt := range pauseTypes {
+			if m.globalEnforced[lt] {
+				anyEnforced = true
+				break
+			}
+		}
+	}
+	m.mu.Unlock()
+
+	if !anyEnforced {
+		ctx := context.Background()
+		paused, _ := m.docker.IsContainerPaused(ctx, dockerID)
+		if paused {
+			if err := m.docker.UnpauseContainer(ctx, dockerID); err != nil {
+				return false, fmt.Errorf("docker unpause: %w", err)
+			}
+		}
+	}
+
+	log.Printf("[enforcement] unfrozen container %s (enforcement_active=%v)", containerID, anyEnforced)
+	if m.bus != nil {
+		m.bus.PublishData(events.ContainerUnfrozen, containerID, events.ContainerUnfrozenData{
+			EnforcementActive: anyEnforced,
+		})
+	}
+	return anyEnforced, nil
+}
+
+// IsFrozen returns whether a container is currently frozen.
+func (m *Manager) IsFrozen(containerID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.frozen[containerID]
 }

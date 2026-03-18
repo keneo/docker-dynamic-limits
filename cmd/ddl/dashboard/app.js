@@ -201,9 +201,11 @@
             var state = cs.state || 'unknown';
             var stateClass = 'state-badge state-' + state;
 
+            var frozenBadge = cs.frozen ? ' <span class="frozen-badge">FROZEN</span>' : '';
+
             tr.innerHTML =
                 '<td><code>' + esc(c.id) + '</code></td>' +
-                '<td>' + esc(c.name || '-') + '</td>' +
+                '<td>' + esc(c.name || '-') + frozenBadge + '</td>' +
                 '<td><span class="' + stateClass + '">' + esc(state) + '</span></td>' +
                 '<td>' + limitCount + '</td>' +
                 '<td>' + enforcedCount + (enforcedCount > 0 ? ' <span class="enforced-badge">ENFORCED</span>' : '') + '</td>' +
@@ -216,6 +218,14 @@
             detailBtn.textContent = 'Details';
             detailBtn.onclick = function () { selectContainer(c.id); };
             actions.appendChild(detailBtn);
+
+            var freezeBtn = document.createElement('button');
+            freezeBtn.className = 'btn btn-sm' + (cs.frozen ? ' btn-primary' : '');
+            freezeBtn.textContent = cs.frozen ? 'Unfreeze' : 'Freeze';
+            freezeBtn.onclick = cs.frozen
+                ? function () { unfreezeContainer(c.id); }
+                : function () { freezeContainer(c.id); };
+            actions.appendChild(freezeBtn);
 
             var cloneBtn = document.createElement('button');
             cloneBtn.className = 'btn btn-sm';
@@ -431,6 +441,28 @@
             refresh();
         }).catch(function (err) {
             toast('Clone failed: ' + err.message, true);
+        });
+    }
+
+    function freezeContainer(id) {
+        api('POST', '/containers/' + id + '/freeze', {}).then(function () {
+            toast('Container frozen');
+            refresh();
+        }).catch(function (err) {
+            toast('Freeze failed: ' + err.message, true);
+        });
+    }
+
+    function unfreezeContainer(id) {
+        api('POST', '/containers/' + id + '/unfreeze', {}).then(function (result) {
+            if (result && result.enforcement_active) {
+                toast('Container unfrozen (enforcement still active)');
+            } else {
+                toast('Container unfrozen');
+            }
+            refresh();
+        }).catch(function (err) {
+            toast('Unfreeze failed: ' + err.message, true);
         });
     }
 

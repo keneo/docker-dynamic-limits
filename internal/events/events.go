@@ -21,6 +21,8 @@ const (
 	OllamaBidChange    EventType = "ollama_bid_change"
 	SystemSleep              EventType = "system_sleep"
 	GlobalEnforcementChange  EventType = "global_enforcement_change"
+	ContainerFrozen          EventType = "container_frozen"
+	ContainerUnfrozen        EventType = "container_unfrozen"
 )
 
 // Event is the top-level envelope sent to subscribers.
@@ -93,6 +95,14 @@ type SystemSleepData struct {
 type GlobalEnforcementChangeData struct {
 	LimitType string `json:"limit_type"`
 	Enforced  bool   `json:"enforced"`
+}
+
+// ContainerFrozenData is the payload for container_frozen events.
+type ContainerFrozenData struct{}
+
+// ContainerUnfrozenData is the payload for container_unfrozen events.
+type ContainerUnfrozenData struct {
+	EnforcementActive bool `json:"enforcement_active"`
 }
 
 // Filter controls which events a subscriber receives.

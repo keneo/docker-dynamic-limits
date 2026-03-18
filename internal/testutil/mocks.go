@@ -20,6 +20,7 @@ type MockStore struct {
 	Limits       map[string]map[model.LimitType]int64
 	Usages       map[string]map[model.LimitType]int64
 	GlobalLimits map[model.LimitType]int64
+	Frozen       map[string]bool
 }
 
 func NewMockStore() *MockStore {
@@ -28,6 +29,7 @@ func NewMockStore() *MockStore {
 		Limits:       make(map[string]map[model.LimitType]int64),
 		Usages:       make(map[string]map[model.LimitType]int64),
 		GlobalLimits: make(map[model.LimitType]int64),
+		Frozen:       make(map[string]bool),
 	}
 }
 
@@ -196,6 +198,19 @@ func (s *MockStore) GetAllGlobalLimits() (map[model.LimitType]int64, error) {
 		result[k] = v
 	}
 	return result, nil
+}
+
+func (s *MockStore) SetFrozen(containerID string, frozen bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Frozen[containerID] = frozen
+	return nil
+}
+
+func (s *MockStore) IsFrozen(containerID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Frozen[containerID], nil
 }
 
 // --- MockDocker ---
@@ -505,6 +520,7 @@ type MockEnforcement struct {
 	Started         map[string]string          // containerID -> dockerID
 	Stopped         []string
 	Enforced        map[string]map[model.LimitType]bool
+	FrozenMap       map[string]bool
 	Notified        []string
 	GlobalEnforced  map[model.LimitType]bool
 	GlobalStarted   bool
@@ -514,6 +530,7 @@ func NewMockEnforcement() *MockEnforcement {
 	return &MockEnforcement{
 		Started:        make(map[string]string),
 		Enforced:       make(map[string]map[model.LimitType]bool),
+		FrozenMap:      make(map[string]bool),
 		GlobalEnforced: make(map[model.LimitType]bool),
 	}
 }
@@ -605,6 +622,34 @@ func (e *MockEnforcement) GetGlobalEnforced() map[model.LimitType]bool {
 		result[k] = v
 	}
 	return result
+}
+
+func (e *MockEnforcement) Freeze(containerID string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.FrozenMap[containerID] = true
+	return nil
+}
+
+func (e *MockEnforcement) Unfreeze(containerID string) (bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.FrozenMap[containerID] = false
+	// Check if any enforcement is active
+	if m, ok := e.Enforced[containerID]; ok {
+		for _, v := range m {
+			if v {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func (e *MockEnforcement) IsFrozen(containerID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.FrozenMap[containerID]
 }
 
 // --- MockProxy ---

@@ -144,6 +144,15 @@ func main() {
 		px.EnableHost("ollama", true)
 		defer oq.Stop()
 		log.Printf("Ollama proxy configured: %s (models: %v)", ollamaURL, cfg.AllowedModels)
+
+		// Restore persisted bids for existing containers
+		if containers, err := st.ListContainers(); err == nil {
+			ids := make([]string, len(containers))
+			for i, c := range containers {
+				ids[i] = c.ID
+			}
+			oq.RestoreBids(ids)
+		}
 	}
 
 	// Start global enforcement
