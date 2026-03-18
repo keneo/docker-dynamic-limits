@@ -27,6 +27,16 @@ var AllLimitTypes = []LimitType{
 	LimitRAMRequestBSec, LimitDiskRequestBSec,
 }
 
+// CumulativeLimitTypes are limit types that represent consumed resources.
+// Their usage is accumulated into the global total when a container is removed,
+// so that removing a container doesn't reduce global usage for irreversible resources.
+// Only ram and disk (current-state metrics) are excluded.
+var CumulativeLimitTypes = []LimitType{
+	LimitCPU, LimitNetwork, LimitDiskIOByte, LimitDiskIOOps, LimitSpending,
+	LimitRAMUsageBSec, LimitDiskUsageBSec,
+	LimitRAMRequestBSec, LimitDiskRequestBSec,
+}
+
 // Container represents a managed container.
 type Container struct {
 	ID          string    `json:"id"`

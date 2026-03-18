@@ -632,6 +632,12 @@ func (m *Manager) checkGlobalEnforcement(ctx context.Context) {
 			totalUsage[lt] += v
 		}
 	}
+	// Add accumulated usage from removed containers
+	if accum, err := m.store.GetGlobalUsageAccum(); err == nil {
+		for lt, v := range accum {
+			totalUsage[lt] += v
+		}
+	}
 
 	for lt, limit := range globalLimits {
 		if limit == 0 {

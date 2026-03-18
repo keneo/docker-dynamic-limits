@@ -214,6 +214,12 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 			globalUsage[lt] += v
 		}
 	}
+	// Add accumulated usage from removed containers
+	if accum, err := s.store.GetGlobalUsageAccum(); err == nil {
+		for lt, v := range accum {
+			globalUsage[lt] += v
+		}
+	}
 
 	writeJSON(w, map[string]interface{}{
 		"containers":      statuses,

@@ -15,21 +15,23 @@ import (
 
 // MockStore implements store.DataStore using in-memory maps.
 type MockStore struct {
-	mu           sync.Mutex
-	Containers   map[string]*model.Container
-	Limits       map[string]map[model.LimitType]int64
-	Usages       map[string]map[model.LimitType]int64
-	GlobalLimits map[model.LimitType]int64
-	Frozen       map[string]bool
+	mu               sync.Mutex
+	Containers       map[string]*model.Container
+	Limits           map[string]map[model.LimitType]int64
+	Usages           map[string]map[model.LimitType]int64
+	GlobalLimits     map[model.LimitType]int64
+	GlobalUsageAccum map[model.LimitType]int64
+	Frozen           map[string]bool
 }
 
 func NewMockStore() *MockStore {
 	return &MockStore{
-		Containers:   make(map[string]*model.Container),
-		Limits:       make(map[string]map[model.LimitType]int64),
-		Usages:       make(map[string]map[model.LimitType]int64),
-		GlobalLimits: make(map[model.LimitType]int64),
-		Frozen:       make(map[string]bool),
+		Containers:       make(map[string]*model.Container),
+		Limits:           make(map[string]map[model.LimitType]int64),
+		Usages:           make(map[string]map[model.LimitType]int64),
+		GlobalLimits:     make(map[model.LimitType]int64),
+		GlobalUsageAccum: make(map[model.LimitType]int64),
+		Frozen:           make(map[string]bool),
 	}
 }
 
@@ -68,6 +70,14 @@ func (s *MockStore) ListContainers() ([]model.Container, error) {
 func (s *MockStore) RemoveContainer(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Accumulate cumulative usage types before deleting
+	if usages, ok := s.Usages[id]; ok {
+		for _, lt := range model.CumulativeLimitTypes {
+			if val, exists := usages[lt]; exists && val > 0 {
+				s.GlobalUsageAccum[lt] += val
+			}
+		}
+	}
 	delete(s.Containers, id)
 	delete(s.Limits, id)
 	delete(s.Usages, id)
@@ -195,6 +205,16 @@ func (s *MockStore) GetAllGlobalLimits() (map[model.LimitType]int64, error) {
 	defer s.mu.Unlock()
 	result := make(map[model.LimitType]int64)
 	for k, v := range s.GlobalLimits {
+		result[k] = v
+	}
+	return result, nil
+}
+
+func (s *MockStore) GetGlobalUsageAccum() (map[model.LimitType]int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make(map[model.LimitType]int64)
+	for k, v := range s.GlobalUsageAccum {
 		result[k] = v
 	}
 	return result, nil

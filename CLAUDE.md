@@ -18,6 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - For each container and each limit type: check current usage, set/increase/decrease limits
 - **Global limits**: shared budgets across all containers — the SUM of all container usage is checked against the global limit. When exceeded, enforcement is applied to ALL containers (same action per limit type as per-container enforcement). The `isOtherPauseActive` check includes global enforcement state to prevent unpausing a container that's globally enforced.
+- **Global usage accumulator**: When a container is removed, its cumulative usage (all types except `ram` and `disk`) is accumulated into `global_usage_accum` table. This prevents removing a container from reducing global totals for irreversible resources like spending, CPU time, network, I/O, and byte-seconds. The accumulator is added to the live sum in both the API (`handleContainers`) and enforcement (`checkGlobalEnforcement`).
 - Container cloning capability
 - Containers must be able to query their own limits and usage from inside the container
 

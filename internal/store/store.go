@@ -29,6 +29,7 @@ type DataStore interface {
 	SetGlobalLimit(limitType model.LimitType, value int64) error
 	GetGlobalLimit(limitType model.LimitType) (int64, error)
 	GetAllGlobalLimits() (map[model.LimitType]int64, error)
+	GetGlobalUsageAccum() (map[model.LimitType]int64, error)
 	SetFrozen(containerID string, frozen bool) error
 	IsFrozen(containerID string) (bool, error)
 }
@@ -88,6 +89,15 @@ func (s *Store) migrate() error {
 
 	// Add frozen column (ignore error if already exists)
 	s.db.Exec(`ALTER TABLE containers ADD COLUMN frozen INTEGER NOT NULL DEFAULT 0`)
+
+	// Global usage accumulator: stores cumulative usage from removed containers
+	// so that removing a container doesn't reduce global totals for irreversible resources.
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS global_usage_accum (
+		type TEXT PRIMARY KEY,
+		value INTEGER NOT NULL DEFAULT 0
+	)`); err != nil {
+		return fmt.Errorf("create global_usage_accum: %w", err)
+	}
 
 	return nil
 }
@@ -155,6 +165,9 @@ func (s *Store) ListContainers() ([]model.Container, error) {
 }
 
 // RemoveContainer removes a container and its limits/usage from the store.
+// Cumulative usage (spending, cpu, net, etc.) is accumulated into the global
+// total so that removing a container doesn't reduce global usage for
+// irreversible resources.
 func (s *Store) RemoveContainer(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -164,6 +177,16 @@ func (s *Store) RemoveContainer(id string) error {
 		return err
 	}
 	defer tx.Rollback()
+
+	// Accumulate cumulative usage types into global accumulator before deleting
+	for _, lt := range model.CumulativeLimitTypes {
+		row := tx.QueryRow(`SELECT value FROM usage WHERE container_id = ? AND type = ?`, id, string(lt))
+		var val int64
+		if err := row.Scan(&val); err == nil && val > 0 {
+			tx.Exec(`INSERT INTO global_usage_accum (type, value) VALUES (?, ?)
+				ON CONFLICT(type) DO UPDATE SET value = value + ?`, string(lt), val, val)
+		}
+	}
 
 	tx.Exec(`DELETE FROM usage WHERE container_id = ?`, id)
 	tx.Exec(`DELETE FROM limits WHERE container_id = ?`, id)
@@ -352,6 +375,26 @@ func (s *Store) GetGlobalLimit(limitType model.LimitType) (int64, error) {
 // GetAllGlobalLimits returns all global limits.
 func (s *Store) GetAllGlobalLimits() (map[model.LimitType]int64, error) {
 	rows, err := s.db.Query(`SELECT type, value FROM global_limits`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[model.LimitType]int64)
+	for rows.Next() {
+		var t string
+		var v int64
+		if err := rows.Scan(&t, &v); err != nil {
+			return nil, err
+		}
+		result[model.LimitType(t)] = v
+	}
+	return result, rows.Err()
+}
+
+// GetGlobalUsageAccum returns the accumulated usage from removed containers.
+func (s *Store) GetGlobalUsageAccum() (map[model.LimitType]int64, error) {
+	rows, err := s.db.Query(`SELECT type, value FROM global_usage_accum`)
 	if err != nil {
 		return nil, err
 	}

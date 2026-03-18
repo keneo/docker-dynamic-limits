@@ -158,6 +158,8 @@ ddl limits decrease <container> ram 128m
 
 Global limits apply a shared budget across **all** containers. When the sum of all container usage exceeds a global limit, enforcement is applied to every container.
 
+**Usage accumulation**: When a container is removed, its cumulative usage (spending, cpu, net, disk-io-bytes, disk-io-ops, and all byte-second types) is preserved in the global total. Only `ram` and `disk` (current-state metrics) are subtracted when a container is removed. This prevents removing a container from reducing global totals for irreversible resources like money spent or CPU time consumed.
+
 ```bash
 ddl limits set-global cpu 24h           # 24 hours of CPU across all containers
 ddl limits set-global spending 100.00   # $100 total spending budget
