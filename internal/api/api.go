@@ -273,15 +273,17 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Set up spending proxy if needed
+	// Set up spending proxy — preserve existing spending/budget on re-register
 	var proxyAddr string
 	if s.proxy != nil {
+		budget, _ := s.store.GetLimit(c.ID, model.LimitSpending)
+		spending, _ := s.store.GetUsage(c.ID, model.LimitSpending)
 		var err error
-		proxyAddr, err = s.proxy.RegisterContainer(c.ID, 0, 0)
+		proxyAddr, err = s.proxy.RegisterContainer(c.ID, budget, spending)
 		if err != nil {
 			log.Printf("[api] warning: failed to start proxy for %s: %v", c.ID, err)
 		} else {
-			log.Printf("[api] proxy for %s available at %s", c.ID, proxyAddr)
+			log.Printf("[api] proxy for %s available at %s (spending: %d, budget: %d)", c.ID, proxyAddr, spending, budget)
 		}
 	}
 
