@@ -15,11 +15,13 @@ func TestRegisterAndList(t *testing.T) {
 	containerID := registerContainer(t, dockerID)
 
 	// Verify it appears in the listing
-	var listing []map[string]interface{}
-	apiGet(t, "/containers", &listing)
+	var resp struct {
+		Containers []map[string]interface{} `json:"containers"`
+	}
+	apiGet(t, "/containers", &resp)
 
 	found := false
-	for _, entry := range listing {
+	for _, entry := range resp.Containers {
 		c, ok := entry["container"].(map[string]interface{})
 		if !ok {
 			continue
@@ -56,10 +58,12 @@ func TestRemoveContainer(t *testing.T) {
 	}
 
 	// Verify it's gone from listing
-	var listing []map[string]interface{}
-	apiGet(t, "/containers", &listing)
+	var resp struct {
+		Containers []map[string]interface{} `json:"containers"`
+	}
+	apiGet(t, "/containers", &resp)
 
-	for _, entry := range listing {
+	for _, entry := range resp.Containers {
 		c, ok := entry["container"].(map[string]interface{})
 		if !ok {
 			continue

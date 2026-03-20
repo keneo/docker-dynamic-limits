@@ -291,6 +291,34 @@ ddl hooks remove 1      # remove hook by index
 
 Hooks are stored in `~/.config/ddl/hooks.json` and execute sequentially via `sh -c` after the daemon is ready. A failed hook prints a warning but does not abort startup.
 
+## Upstream error webhooks
+
+Configure webhook URLs to receive notifications when a remote LLM provider returns an error (e.g., Anthropic "credit balance too low", OpenAI rate limit). The daemon POSTs a JSON payload to each configured URL:
+
+```bash
+ddl config set error-webhooks "https://hooks.slack.com/...,https://my-server.com/webhook"
+ddl config get   # shows configured webhooks
+```
+
+**Payload:**
+```json
+{
+  "type": "proxy_upstream_error",
+  "timestamp": "2026-03-20T12:00:00Z",
+  "container_id": "abc123",
+  "container_name": "creature-ollie",
+  "host": "api.anthropic.com",
+  "status_code": 402,
+  "error_type": "invalid_request_error",
+  "error_message": "Your credit balance is too low...",
+  "request_id": "req_011CZE8..."
+}
+```
+
+**Deduplication:** The same error (same host + error type) fires at most once per 5 minutes, preventing webhook floods when every request to a provider fails with the same error.
+
+Errors are also visible as `proxy_upstream_error` events via `ddl events` and in the dashboard activity log.
+
 ## In-container self-query
 
 Containers are automatically identified by their source IP address (refreshed every 5 seconds). No tokens or headers needed.

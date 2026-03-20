@@ -57,6 +57,20 @@ type SpendingTracker struct {
 	ollamaQueue OllamaHandler
 	// activity stores recent proxy requests per container
 	activity map[string][]ProxyActivity
+	// onUpstreamError is called when an upstream API returns an error response
+	onUpstreamError func(info UpstreamErrorInfo)
+	// errorDedup tracks last webhook fire time per error key to avoid flooding
+	errorDedup map[string]time.Time
+}
+
+// UpstreamErrorInfo describes an error returned by an upstream API provider.
+type UpstreamErrorInfo struct {
+	ContainerID  string `json:"container_id"`
+	Host         string `json:"host"`
+	StatusCode   int    `json:"status_code"`
+	ErrorType    string `json:"error_type,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
+	RequestID    string `json:"request_id,omitempty"`
 }
 
 // ModelPricing holds per-token costs in micro-cents.
@@ -99,6 +113,7 @@ func NewSpendingTracker(onUpdate func(containerID string, totalCents int64)) *Sp
 		onSpendingUpdate: onUpdate,
 		enabledHosts:     make(map[string]bool),
 		activity:         make(map[string][]ProxyActivity),
+		errorDedup:       make(map[string]time.Time),
 	}
 }
 
@@ -224,6 +239,13 @@ func (st *SpendingTracker) SetOllamaHandler(h OllamaHandler) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.ollamaQueue = h
+}
+
+// SetErrorCallback sets the callback invoked when an upstream API returns an error.
+func (st *SpendingTracker) SetErrorCallback(fn func(info UpstreamErrorInfo)) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.onUpstreamError = fn
 }
 
 // SetEnabledHosts sets which provider hosts are enabled.
@@ -435,6 +457,11 @@ func (st *SpendingTracker) proxyHandler(containerID string) http.Handler {
 			}
 			act := st.trackSpendingWithActivity(containerID, r.Host, r.URL.Path, r.Method, reqBody, body, resp.StatusCode, durationMs)
 			st.RecordActivity(containerID, act)
+
+			// Detect upstream errors and fire callback (deduplicated)
+			if resp.StatusCode >= 400 {
+				st.handleUpstreamError(containerID, r.Host, resp.StatusCode, body)
+			}
 		}
 
 		// Copy response headers
@@ -647,6 +674,59 @@ func (st *SpendingTracker) LoadPrices(r io.Reader) error {
 		st.prices[k] = v
 	}
 	return nil
+}
+
+// SetResolveOverrides configures DNS resolution overrides so that requests
+// to the given hostnames are routed to the specified IP addresses instead.
+// This enables testing with mock API servers on localhost.
+const errorDedupInterval = 5 * time.Minute
+
+// handleUpstreamError parses upstream error responses and fires the error callback
+// with deduplication (same host+error_type fires at most once per 5 minutes).
+func (st *SpendingTracker) handleUpstreamError(containerID, host string, statusCode int, body []byte) {
+	st.mu.RLock()
+	cb := st.onUpstreamError
+	st.mu.RUnlock()
+	if cb == nil {
+		return
+	}
+
+	host = stripPort(host)
+	info := UpstreamErrorInfo{
+		ContainerID: containerID,
+		Host:        host,
+		StatusCode:  statusCode,
+	}
+
+	// Parse known error formats
+	// Anthropic: {"type":"error","error":{"type":"...","message":"..."},"request_id":"..."}
+	// OpenAI: {"error":{"type":"...","message":"..."}}
+	var parsed struct {
+		Type      string `json:"type"`
+		RequestID string `json:"request_id"`
+		Error     struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &parsed) == nil && parsed.Error.Message != "" {
+		info.ErrorType = parsed.Error.Type
+		info.ErrorMessage = parsed.Error.Message
+		info.RequestID = parsed.RequestID
+	}
+
+	// Deduplicate: same host + error type fires at most once per interval
+	dedupKey := host + ":" + info.ErrorType
+	st.mu.Lock()
+	if last, ok := st.errorDedup[dedupKey]; ok && time.Since(last) < errorDedupInterval {
+		st.mu.Unlock()
+		return
+	}
+	st.errorDedup[dedupKey] = time.Now()
+	st.mu.Unlock()
+
+	log.Printf("[proxy] upstream error from %s (status %d): %s — %s", host, statusCode, info.ErrorType, info.ErrorMessage)
+	go cb(info)
 }
 
 // SetResolveOverrides configures DNS resolution overrides so that requests

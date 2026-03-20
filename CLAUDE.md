@@ -38,6 +38,7 @@ The daemon supports runtime configuration via `ddl config get` / `ddl config set
 | `ollama-queue-size` | int | yes | |
 | `ollama-timeout` | duration | yes | e.g. `2m`, `120s` |
 | `ollama-default-bid` | int | yes | milli-cents/wall-sec |
+| `error-webhooks` | list | yes | Comma-separated webhook URLs |
 
 API: `GET /config` returns all config (keys masked), `PUT /config` accepts partial JSON updates. The dashboard shows config read-only in a collapsible panel.
 
@@ -76,6 +77,20 @@ User-initiated freeze/unfreeze for pausing container lifetime. "Freeze" is disti
 | Unfreeze with no enforcement active | Docker unpause + clear frozen flag + resume byte-sec |
 
 **Implementation:** `frozen` column in SQLite, `frozen` map in `enforcement.Manager`, `isOtherPauseActive()` returns true when frozen. CLI: `ddl freeze/unfreeze/freeze-all/unfreeze-all`. API: `POST /containers/{id}/freeze`, `POST /containers/{id}/unfreeze`, `POST /freeze-all`, `POST /unfreeze-all`. Events: `container_frozen`, `container_unfrozen`. Ollama: `CancelAllPending()` on freeze cancels pending+active requests but keeps bid.
+
+## Upstream Error Webhooks
+
+When an upstream LLM API (Anthropic, OpenAI) returns an error response (HTTP 4xx/5xx), the daemon can call configurable webhook URLs. This notifies the operator of issues like expired API keys or exhausted credit balances.
+
+**Error detection**: In `proxyHandler()`, after receiving the upstream response, errors are parsed for known provider formats (Anthropic `{"type":"error","error":{...}}`, OpenAI `{"error":{...}}`).
+
+**Deduplication**: Same `host:error_type` fires at most once per 5 minutes to prevent flooding. Tracked in-memory in `SpendingTracker.errorDedup`.
+
+**Webhook payload**: POST JSON with `type`, `timestamp`, `container_id`, `container_name`, `host`, `status_code`, `error_type`, `error_message`, `request_id`. 5s timeout per call, runs in goroutine.
+
+**Config**: `ddl config set error-webhooks "url1,url2"`. API: `PUT /config {"error_webhooks": ["url1","url2"]}`. Persisted to `config.json`.
+
+**Event**: `proxy_upstream_error` event published via bus, visible in `ddl events`.
 
 ## System Sleep Handling
 

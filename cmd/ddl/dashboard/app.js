@@ -655,7 +655,8 @@
         { key: 'ollama-models', json: 'ollama_models', isList: true },
         { key: 'ollama-queue-size', json: 'ollama_queue_size' },
         { key: 'ollama-timeout', json: 'ollama_timeout' },
-        { key: 'ollama-default-bid', json: 'ollama_default_bid' }
+        { key: 'ollama-default-bid', json: 'ollama_default_bid' },
+        { key: 'error-webhooks', json: 'error_webhooks', isList: true }
     ];
 
     configToggle.addEventListener('click', function () {

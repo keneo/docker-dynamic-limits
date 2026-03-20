@@ -32,6 +32,7 @@ var configKeys = map[string]configKeyInfo{
 	"ollama-queue-size": {jsonKey: "ollama_queue_size", keyType: "int"},
 	"ollama-timeout":    {jsonKey: "ollama_timeout", keyType: "duration"},
 	"ollama-default-bid": {jsonKey: "ollama_default_bid", keyType: "int"},
+	"error-webhooks":     {jsonKey: "error_webhooks", keyType: "stringlist"},
 }
 
 // configDisplayOrder defines the order keys are displayed in "config get".
@@ -46,6 +47,7 @@ var configDisplayOrder = []string{
 	"ollama-queue-size",
 	"ollama-timeout",
 	"ollama-default-bid",
+	"error-webhooks",
 }
 
 func configCmd() *cobra.Command {
@@ -115,6 +117,7 @@ Keys:
   ollama-queue-size    int      Max queue size
   ollama-timeout       duration Request timeout (e.g. 2m, 120s)
   ollama-default-bid   int      Default bid in milli-cents/wall-sec
+  error-webhooks       list     Comma-separated webhook URLs for upstream API errors
 
 Note: ollama-url changes take effect for the next queued request.`,
 		Args: cobra.ExactArgs(2),

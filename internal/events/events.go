@@ -23,6 +23,7 @@ const (
 	GlobalEnforcementChange  EventType = "global_enforcement_change"
 	ContainerFrozen          EventType = "container_frozen"
 	ContainerUnfrozen        EventType = "container_unfrozen"
+	ProxyUpstreamError       EventType = "proxy_upstream_error"
 )
 
 // Event is the top-level envelope sent to subscribers.
@@ -95,6 +96,15 @@ type SystemSleepData struct {
 type GlobalEnforcementChangeData struct {
 	LimitType string `json:"limit_type"`
 	Enforced  bool   `json:"enforced"`
+}
+
+// ProxyUpstreamErrorData is the payload for proxy_upstream_error events.
+type ProxyUpstreamErrorData struct {
+	Host         string `json:"host"`
+	StatusCode   int    `json:"status_code"`
+	ErrorType    string `json:"error_type,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
+	RequestID    string `json:"request_id,omitempty"`
 }
 
 // ContainerFrozenData is the payload for container_frozen events.

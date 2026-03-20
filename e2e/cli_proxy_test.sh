@@ -228,7 +228,7 @@ echo "  Short ID: $SHORT_ID"
 # Extract proxy address from ddld stderr
 sleep 0.3
 PROXY_LINE=$(grep "proxy for $SHORT_ID available at" "$TMPDIR/ddld.stderr" | tail -1)
-PROXY_ADDR_RAW=$(echo "$PROXY_LINE" | sed 's/.*available at //')
+PROXY_ADDR_RAW=$(echo "$PROXY_LINE" | sed 's/.*available at //; s/ .*//')
 PROXY_PORT=$(echo "$PROXY_ADDR_RAW" | sed 's/.*://')
 PROXY_ADDR="127.0.0.1:$PROXY_PORT"
 echo "  Proxy: $PROXY_ADDR"

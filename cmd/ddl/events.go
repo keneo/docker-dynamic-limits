@@ -37,6 +37,7 @@ Event types:
   ollama_dequeue      An Ollama inference request completed
   ollama_cancel       An Ollama inference request was cancelled
   ollama_bid_change   A container's Ollama bid was changed
+  proxy_upstream_error  An upstream LLM API returned an error
 
 Examples:
   ddl events                                    # stream all events
@@ -236,6 +237,16 @@ Use --sock or DDL_SOCK to connect via unix socket, or --api to connect via TCP.`
 						} else {
 							fmt.Println("  unfrozen")
 						}
+					}
+				case "proxy_upstream_error":
+					var d struct {
+						Host         string `json:"host"`
+						StatusCode   int    `json:"status_code"`
+						ErrorType    string `json:"error_type"`
+						ErrorMessage string `json:"error_message"`
+					}
+					if json.Unmarshal(evt.Data, &d) == nil {
+						fmt.Printf("  upstream error from %s (HTTP %d): %s — %s\n", d.Host, d.StatusCode, d.ErrorType, d.ErrorMessage)
 					}
 				}
 				fmt.Println()

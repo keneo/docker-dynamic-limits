@@ -36,6 +36,9 @@ type Server struct {
 	ipMu  sync.RWMutex
 	ipMap map[string]string // IP → containerID
 	done  chan struct{}
+
+	webhookMu     sync.RWMutex
+	errorWebhooks []string
 }
 
 // NewServer creates a new API server. oq may be nil when Ollama is not configured.
@@ -58,6 +61,32 @@ func NewServer(st store.DataStore, dc docker.DockerClient, em enforcement.Enforc
 	s.registerRoutes()
 	s.refreshIPs()
 	go s.ipRefreshLoop()
+
+	// Wire up upstream error callback for webhooks + events
+	if st, ok := px.(*proxy.SpendingTracker); ok {
+		st.SetErrorCallback(func(info proxy.UpstreamErrorInfo) {
+			// Resolve container name for the webhook payload
+			name := info.ContainerID
+			if c, err := s.store.GetContainer(info.ContainerID); err == nil {
+				name = c.Name
+			}
+
+			// Publish event
+			if s.bus != nil {
+				s.bus.PublishData(events.ProxyUpstreamError, info.ContainerID, events.ProxyUpstreamErrorData{
+					Host:         info.Host,
+					StatusCode:   info.StatusCode,
+					ErrorType:    info.ErrorType,
+					ErrorMessage: info.ErrorMessage,
+					RequestID:    info.RequestID,
+				})
+			}
+
+			// Call webhooks
+			s.callErrorWebhooks(info, name)
+		})
+	}
+
 	return s
 }
 
@@ -947,6 +976,10 @@ func (s *Server) buildConfigResponse() map[string]interface{} {
 		result["ollama_default_bid"] = cfg.DefaultBid
 	}
 
+	s.webhookMu.RLock()
+	result["error_webhooks"] = s.errorWebhooks
+	s.webhookMu.RUnlock()
+
 	return result
 }
 
@@ -1040,6 +1073,23 @@ func (s *Server) applyConfig(st *proxy.SpendingTracker, req map[string]interface
 				return fmt.Errorf("ollama_url: expected string")
 			}
 			s.ollama.SetOllamaURL(str)
+		case "error_webhooks":
+			arr, ok := val.([]interface{})
+			if !ok {
+				return fmt.Errorf("error_webhooks: expected array of strings")
+			}
+			urls := make([]string, 0, len(arr))
+			for _, v := range arr {
+				u, ok := v.(string)
+				if !ok {
+					return fmt.Errorf("error_webhooks: expected array of strings")
+				}
+				urls = append(urls, u)
+			}
+			s.webhookMu.Lock()
+			s.errorWebhooks = urls
+			s.webhookMu.Unlock()
+			log.Printf("[api] error webhooks configured: %v", urls)
 		default:
 			return fmt.Errorf("unknown config key: %s", key)
 		}
@@ -1096,6 +1146,48 @@ func (s *Server) LoadPersistedConfig() {
 		log.Printf("[api] error applying persisted config: %v", err)
 	} else {
 		log.Printf("[api] loaded persisted config from %s", s.configPath)
+	}
+}
+
+// --- Error Webhooks ---
+
+func (s *Server) callErrorWebhooks(info proxy.UpstreamErrorInfo, containerName string) {
+	s.webhookMu.RLock()
+	urls := make([]string, len(s.errorWebhooks))
+	copy(urls, s.errorWebhooks)
+	s.webhookMu.RUnlock()
+
+	if len(urls) == 0 {
+		return
+	}
+
+	payload := map[string]interface{}{
+		"type":           "proxy_upstream_error",
+		"timestamp":      time.Now().UTC().Format(time.RFC3339),
+		"container_id":   info.ContainerID,
+		"container_name": containerName,
+		"host":           info.Host,
+		"status_code":    info.StatusCode,
+		"error_type":     info.ErrorType,
+		"error_message":  info.ErrorMessage,
+		"request_id":     info.RequestID,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, u := range urls {
+		go func(url string) {
+			resp, err := client.Post(url, "application/json", strings.NewReader(string(body)))
+			if err != nil {
+				log.Printf("[webhook] error calling %s: %v", url, err)
+				return
+			}
+			resp.Body.Close()
+			log.Printf("[webhook] called %s (status %d)", url, resp.StatusCode)
+		}(u)
 	}
 }
 
