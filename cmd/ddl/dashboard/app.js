@@ -367,6 +367,19 @@
             el.innerHTML = '<p class="empty-msg">No proxy activity yet.</p>';
             return;
         }
+
+        // Save scroll positions of expanded activity bodies before re-render
+        var savedScrolls = {};
+        el.querySelectorAll('.activity-body-row:not([hidden])').forEach(function (row) {
+            var idx = row.dataset.idx;
+            var pres = row.querySelectorAll('.activity-body');
+            pres.forEach(function (pre, j) {
+                if (pre.scrollTop || pre.scrollLeft) {
+                    savedScrolls[idx + ':' + j] = { top: pre.scrollTop, left: pre.scrollLeft };
+                }
+            });
+        });
+
         var html = '<table class="activity-table"><thead><tr>' +
             '<th>Time</th><th>Host</th><th>Path</th><th>Model</th>' +
             '<th>Tokens</th><th>Cost</th><th>Status</th><th>Duration</th>' +
@@ -395,12 +408,25 @@
                 '</tr>' +
                 '<tr class="activity-body-row" data-idx="' + i + '"' + (isExpanded ? '' : ' hidden') + '>' +
                 '<td colspan="8"><div class="activity-bodies">' +
-                '<div><strong>Request:</strong><pre class="activity-body">' + esc(formatJSON(a.request_body)) + '</pre></div>' +
-                '<div><strong>Response:</strong><pre class="activity-body">' + esc(formatJSON(a.response_body)) + '</pre></div>' +
+                '<div><strong>Request:</strong><pre class="activity-body">' + highlightJSON(a.request_body) + '</pre></div>' +
+                '<div><strong>Response:</strong><pre class="activity-body">' + highlightJSON(a.response_body) + '</pre></div>' +
                 '</div></td></tr>';
         }
         html += '</tbody></table>';
         el.innerHTML = html;
+
+        // Restore scroll positions
+        el.querySelectorAll('.activity-body-row:not([hidden])').forEach(function (row) {
+            var idx = row.dataset.idx;
+            var pres = row.querySelectorAll('.activity-body');
+            pres.forEach(function (pre, j) {
+                var saved = savedScrolls[idx + ':' + j];
+                if (saved) {
+                    pre.scrollTop = saved.top;
+                    pre.scrollLeft = saved.left;
+                }
+            });
+        });
 
         // Click to expand/collapse
         el.querySelectorAll('.activity-row').forEach(function (row) {
@@ -417,6 +443,35 @@
                 }
             });
         });
+    }
+
+    function escHTML(s) {
+        return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function highlightJSON(s) {
+        if (!s) return '<span class="json-null">(empty)</span>';
+        try {
+            var formatted = JSON.stringify(JSON.parse(s), null, 2);
+            // Highlight JSON syntax: keys, strings, numbers, booleans, null
+            return escHTML(formatted).replace(
+                /&quot;([^&]*)&quot;/g, '"$1"'  // undo &quot; from escHTML (there aren't any — we used &amp; &lt; &gt;)
+            ).replace(
+                /"([^"]+)"(\s*:)/g, '<span class="json-key">"$1"</span>$2'
+            ).replace(
+                /:\s*"([^"]*)"/g, function (m, val) {
+                    return ': <span class="json-str">"' + val + '"</span>';
+                }
+            ).replace(
+                /:\s*(-?\d+\.?\d*([eE][+-]?\d+)?)\b/g, ': <span class="json-num">$1</span>'
+            ).replace(
+                /:\s*(true|false)\b/g, ': <span class="json-bool">$1</span>'
+            ).replace(
+                /:\s*(null)\b/g, ': <span class="json-null">$1</span>'
+            );
+        } catch (e) {
+            return escHTML(s);
+        }
     }
 
     function formatJSON(s) {
