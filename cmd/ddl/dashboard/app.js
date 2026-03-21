@@ -451,27 +451,30 @@
 
     function highlightJSON(s) {
         if (!s) return '<span class="json-null">(empty)</span>';
+        var text;
         try {
-            var formatted = JSON.stringify(JSON.parse(s), null, 2);
-            // Highlight JSON syntax: keys, strings, numbers, booleans, null
-            return escHTML(formatted).replace(
-                /&quot;([^&]*)&quot;/g, '"$1"'  // undo &quot; from escHTML (there aren't any — we used &amp; &lt; &gt;)
-            ).replace(
-                /"([^"]+)"(\s*:)/g, '<span class="json-key">"$1"</span>$2'
-            ).replace(
-                /:\s*"([^"]*)"/g, function (m, val) {
-                    return ': <span class="json-str">"' + val + '"</span>';
-                }
-            ).replace(
-                /:\s*(-?\d+\.?\d*([eE][+-]?\d+)?)\b/g, ': <span class="json-num">$1</span>'
-            ).replace(
-                /:\s*(true|false)\b/g, ': <span class="json-bool">$1</span>'
-            ).replace(
-                /:\s*(null)\b/g, ': <span class="json-null">$1</span>'
-            );
+            text = JSON.stringify(JSON.parse(s), null, 2);
         } catch (e) {
-            return escHTML(s);
+            // Truncated or invalid JSON — best-effort format the raw text
+            text = s;
         }
+        return colorizeJSON(escHTML(text));
+    }
+
+    function colorizeJSON(escaped) {
+        return escaped.replace(
+            /"([^"]+)"(\s*:)/g, '<span class="json-key">"$1"</span>$2'
+        ).replace(
+            /:\s*"([^"]*)"/g, function (m, val) {
+                return ': <span class="json-str">"' + val + '"</span>';
+            }
+        ).replace(
+            /:\s*(-?\d+\.?\d*([eE][+-]?\d+)?)\b/g, ': <span class="json-num">$1</span>'
+        ).replace(
+            /:\s*(true|false)\b/g, ': <span class="json-bool">$1</span>'
+        ).replace(
+            /:\s*(null)\b/g, ': <span class="json-null">$1</span>'
+        );
     }
 
     function formatJSON(s) {
