@@ -19,7 +19,7 @@ import (
 // EnforcementController defines the interface for enforcement operations.
 type EnforcementController interface {
 	StartContainer(containerID string, dockerID string)
-	StopContainer(containerID string)
+	StopContainer(containerID string, reason string)
 	IsEnforced(containerID string, lt model.LimitType) bool
 	GetEnforced(containerID string) map[model.LimitType]bool
 	NotifyLimitChanged(containerID string)
@@ -89,7 +89,7 @@ func (m *Manager) StartContainer(containerID string, dockerID string) {
 }
 
 // StopContainer stops enforcement for a container.
-func (m *Manager) StopContainer(containerID string) {
+func (m *Manager) StopContainer(containerID string, reason string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if cancel, ok := m.workers[containerID]; ok {
@@ -98,7 +98,7 @@ func (m *Manager) StopContainer(containerID string) {
 		delete(m.enforced, containerID)
 		delete(m.frozen, containerID)
 		delete(m.dockerIDs, containerID)
-		log.Printf("[enforcement] stopped monitoring container %s", containerID)
+		log.Printf("[enforcement] stopped monitoring container %s: %s", containerID, reason)
 	}
 }
 

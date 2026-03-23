@@ -561,7 +561,7 @@ func (e *MockEnforcement) StartContainer(containerID string, dockerID string) {
 	e.Started[containerID] = dockerID
 }
 
-func (e *MockEnforcement) StopContainer(containerID string) {
+func (e *MockEnforcement) StopContainer(containerID string, reason string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.Stopped = append(e.Stopped, containerID)

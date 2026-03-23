@@ -373,7 +373,7 @@ func (s *Server) handleContainerInfo(w http.ResponseWriter, r *http.Request, con
 	}
 
 	if r.Method == http.MethodDelete {
-		s.enforcement.StopContainer(containerID)
+		s.enforcement.StopContainer(containerID, "removed via API")
 		if s.ollama != nil {
 			s.ollama.RemoveContainer(containerID)
 		}

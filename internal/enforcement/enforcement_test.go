@@ -32,7 +32,7 @@ func TestStartStopContainer(t *testing.T) {
 		t.Error("worker not found after StartContainer")
 	}
 
-	m.StopContainer("c1")
+	m.StopContainer("c1", "test")
 
 	m.mu.Lock()
 	_, exists = m.workers["c1"]
@@ -55,13 +55,13 @@ func TestStartContainerIdempotent(t *testing.T) {
 		t.Errorf("expected 1 worker, got %d", count)
 	}
 
-	m.StopContainer("c1")
+	m.StopContainer("c1", "test")
 }
 
 func TestStopContainerNonexistent(t *testing.T) {
 	m, _, _, _, _, _ := newTestManager()
 	// Should not panic
-	m.StopContainer("nonexistent")
+	m.StopContainer("nonexistent", "test")
 }
 
 func TestIsEnforcedDefault(t *testing.T) {
@@ -102,7 +102,7 @@ func TestEnforcementCPUPause(t *testing.T) {
 
 	m.StartContainer(containerID, dockerID)
 	time.Sleep(200 * time.Millisecond)
-	m.StopContainer(containerID)
+	m.StopContainer(containerID, "test")
 
 	// Verify container was paused (goroutine stopped, safe to read)
 	paused, _ := md.IsContainerPaused(nil, dockerID)
@@ -127,7 +127,7 @@ func TestEnforcementNoLimitNoAction(t *testing.T) {
 
 	m.StartContainer(containerID, dockerID)
 	time.Sleep(200 * time.Millisecond)
-	m.StopContainer(containerID)
+	m.StopContainer(containerID, "test")
 
 	paused, _ := md.IsContainerPaused(nil, dockerID)
 	if paused {
@@ -151,7 +151,7 @@ func TestEnforcementUsageBelowLimit(t *testing.T) {
 
 	m.StartContainer(containerID, dockerID)
 	time.Sleep(200 * time.Millisecond)
-	m.StopContainer(containerID)
+	m.StopContainer(containerID, "test")
 
 	paused, _ := md.IsContainerPaused(nil, dockerID)
 	if paused {
@@ -221,7 +221,7 @@ func TestEnforcementAlreadyPaused(t *testing.T) {
 	// Now increase the limit so usage < limit → should release
 	ms.SetLimit(containerID, model.LimitCPU, 7200) // 2 hours
 	time.Sleep(200 * time.Millisecond)
-	m.StopContainer(containerID)
+	m.StopContainer(containerID, "test")
 
 	paused, _ := md.IsContainerPaused(nil, dockerID)
 	if paused {
@@ -253,7 +253,7 @@ func TestEnforcementReconcileAfterRestart(t *testing.T) {
 	// enforced map is empty (simulates daemon restart)
 	m.StartContainer(containerID, dockerID)
 	time.Sleep(200 * time.Millisecond)
-	m.StopContainer(containerID)
+	m.StopContainer(containerID, "test")
 
 	// Container should be unpaused since usage < limit
 	paused, _ := md.IsContainerPaused(nil, dockerID)
@@ -299,7 +299,7 @@ func TestEnforcementEmitsUsageUpdate(t *testing.T) {
 	defer bus.Unsubscribe(sub)
 
 	m.StartContainer(containerID, dockerID)
-	defer m.StopContainer(containerID)
+	defer m.StopContainer(containerID, "test")
 
 	select {
 	case e := <-sub.C:
@@ -494,7 +494,7 @@ func TestEnforcementEmitsEnforcementChange(t *testing.T) {
 	defer bus.Unsubscribe(sub)
 
 	m.StartContainer(containerID, dockerID)
-	defer m.StopContainer(containerID)
+	defer m.StopContainer(containerID, "test")
 
 	select {
 	case e := <-sub.C:
