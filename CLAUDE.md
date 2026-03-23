@@ -78,6 +78,10 @@ User-initiated freeze/unfreeze for pausing container lifetime. "Freeze" is disti
 
 **Implementation:** `frozen` column in SQLite, `frozen` map in `enforcement.Manager`, `isOtherPauseActive()` returns true when frozen. CLI: `ddl freeze/unfreeze/freeze-all/unfreeze-all`. API: `POST /containers/{id}/freeze`, `POST /containers/{id}/unfreeze`, `POST /freeze-all`, `POST /unfreeze-all`. Events: `container_frozen`, `container_unfrozen`. Ollama: `CancelAllPending()` on freeze cancels pending+active requests but keeps bid.
 
+## Container Kill on Byte-Second Limits
+
+When a byte-second limit (`ram-usage-bsec`, `disk-usage-bsec`, `ram-request-bsec`, `disk-request-bsec`) is exceeded, the container is **killed** via `docker stop` (SIGTERM + 10s timeout + SIGKILL). This is more aggressive than other limit types which pause or throttle. A `container_killed` event is emitted with `limit_type`, `usage_at_kill`, and `limit_at_kill` fields, visible via `ddl events`. Logs are persisted to `/data/ddld.log` on the data volume.
+
 ## Upstream Error Webhooks
 
 When an upstream LLM API (Anthropic, OpenAI) returns an error response (HTTP 4xx/5xx), the daemon can call configurable webhook URLs. This notifies the operator of issues like expired API keys or exhausted credit balances.

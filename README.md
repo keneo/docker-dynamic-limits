@@ -233,6 +233,10 @@ Event types:
 | `ollama_dequeue` | Ollama inference request completed | Queue processor |
 | `ollama_cancel` | Ollama request cancelled/timed out | Queue timeout/cancel |
 | `ollama_bid_change` | Container's Ollama bid changed | `PUT /ollama/bid` |
+| `container_killed` | Container killed due to byte-second limit | Enforcement manager |
+| `container_frozen` | Container frozen (user-initiated) | `POST /containers/{id}/freeze` |
+| `container_unfrozen` | Container unfrozen | `POST /containers/{id}/unfreeze` |
+| `proxy_upstream_error` | Upstream LLM API returned an error | Proxy handler |
 | `global_enforcement_change` | Global enforcement applied or released | Global enforcement loop |
 
 The WebSocket endpoint is `GET /events` with optional query parameters:

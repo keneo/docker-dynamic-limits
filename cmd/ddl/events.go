@@ -37,6 +37,7 @@ Event types:
   ollama_dequeue      An Ollama inference request completed
   ollama_cancel       An Ollama inference request was cancelled
   ollama_bid_change   A container's Ollama bid was changed
+  container_killed      A container was killed due to resource limit
   proxy_upstream_error  An upstream LLM API returned an error
 
 Examples:
@@ -237,6 +238,16 @@ Use --sock or DDL_SOCK to connect via unix socket, or --api to connect via TCP.`
 						} else {
 							fmt.Println("  unfrozen")
 						}
+					}
+				case "container_killed":
+					var d struct {
+						LimitType   string `json:"limit_type"`
+						UsageAtKill int64  `json:"usage_at_kill"`
+						LimitAtKill int64  `json:"limit_at_kill"`
+					}
+					if json.Unmarshal(evt.Data, &d) == nil {
+						fmt.Printf("  killed: %s (usage=%s, limit=%s)\n",
+							d.LimitType, formatValue(d.LimitType, d.UsageAtKill), formatValue(d.LimitType, d.LimitAtKill))
 					}
 				case "proxy_upstream_error":
 					var d struct {

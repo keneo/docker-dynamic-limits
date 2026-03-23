@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -32,6 +33,15 @@ func main() {
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+	// Tee logs to a file alongside the database
+	if dir := dirOf(*dbPath); dir != "" {
+		logFile, err := os.OpenFile(filepath.Join(dir, "ddld.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err == nil {
+			log.SetOutput(io.MultiWriter(os.Stderr, logFile))
+		}
+	}
+
 	log.Println("ddld starting...")
 
 	// Ensure data directory exists

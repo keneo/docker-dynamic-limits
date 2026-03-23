@@ -406,7 +406,16 @@ func (m *Manager) enforce(ctx context.Context, containerID, dockerID string, lt 
 		model.LimitRAMRequestBSec, model.LimitDiskRequestBSec:
 		err = m.docker.StopContainer(ctx, dockerID)
 		if err == nil {
-			log.Printf("[enforcement] killed container %s: %s limit exceeded", containerID, lt)
+			usage, _ := m.store.GetUsage(containerID, lt)
+			limit, _ := m.store.GetLimit(containerID, lt)
+			log.Printf("[enforcement] killed container %s: %s limit exceeded (usage=%d, limit=%d)", containerID, lt, usage, limit)
+			if m.bus != nil {
+				m.bus.PublishData(events.ContainerKilled, containerID, events.ContainerKilledData{
+					LimitType:   string(lt),
+					UsageAtKill: usage,
+					LimitAtKill: limit,
+				})
+			}
 		}
 	}
 

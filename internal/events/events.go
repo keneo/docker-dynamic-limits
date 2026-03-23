@@ -24,6 +24,7 @@ const (
 	ContainerFrozen          EventType = "container_frozen"
 	ContainerUnfrozen        EventType = "container_unfrozen"
 	ProxyUpstreamError       EventType = "proxy_upstream_error"
+	ContainerKilled          EventType = "container_killed"
 )
 
 // Event is the top-level envelope sent to subscribers.
@@ -105,6 +106,13 @@ type ProxyUpstreamErrorData struct {
 	ErrorType    string `json:"error_type,omitempty"`
 	ErrorMessage string `json:"error_message,omitempty"`
 	RequestID    string `json:"request_id,omitempty"`
+}
+
+// ContainerKilledData is the payload for container_killed events.
+type ContainerKilledData struct {
+	LimitType   string `json:"limit_type"`
+	UsageAtKill int64  `json:"usage_at_kill"`
+	LimitAtKill int64  `json:"limit_at_kill"`
 }
 
 // ContainerFrozenData is the payload for container_frozen events.
