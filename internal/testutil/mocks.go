@@ -243,6 +243,8 @@ type MockDocker struct {
 	ClonedFrom     []string // track clone calls
 	CloneIDCounter int
 	StoppedContainers []string // track StopContainer calls
+	// Call counters for verifying optimization
+	IsRunningCalls int
 }
 
 type MockContainerState struct {
@@ -328,11 +330,24 @@ func (d *MockDocker) IsContainerPaused(ctx context.Context, id string) (bool, er
 func (d *MockDocker) IsContainerRunning(ctx context.Context, id string) (bool, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.IsRunningCalls++
 	state, ok := d.Containers[id]
 	if !ok {
 		return false, fmt.Errorf("container %s not found", id)
 	}
 	return state.Running, nil
+}
+
+func (d *MockDocker) GetIsRunningCalls() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.IsRunningCalls
+}
+
+func (d *MockDocker) ResetIsRunningCalls() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.IsRunningCalls = 0
 }
 
 func (d *MockDocker) UpdateMemoryLimit(ctx context.Context, id string, memoryBytes int64) error {

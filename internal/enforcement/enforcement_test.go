@@ -476,6 +476,76 @@ func TestIsOtherPauseActiveIncludesGlobal(t *testing.T) {
 	}
 }
 
+func TestFrozenContainerSkipsExpensiveOps(t *testing.T) {
+	m, ms, md, mc, _, _ := newTestManager()
+
+	dockerID := "abcdef123456789000"
+	containerID := dockerID[:12]
+
+	md.AddContainer(dockerID, "test", true)
+	ms.RegisterContainer(dockerID, "test")
+	ms.SetLimit(containerID, model.LimitCPU, 100)
+
+	cgPath := "/cgroup/test"
+	mc.CgroupPaths[dockerID] = cgPath
+	mc.CPUUsage[cgPath] = 50_000_000 // 50 seconds
+
+	// Mark container as frozen
+	m.mu.Lock()
+	m.frozen[containerID] = true
+	m.enforced[containerID] = make(map[model.LimitType]bool)
+	m.mu.Unlock()
+
+	md.ResetIsRunningCalls()
+
+	// Run several ticks — none should call Docker API
+	for i := 0; i < 10; i++ {
+		m.checkAndEnforce(nil, containerID, dockerID, false)
+	}
+
+	if calls := md.GetIsRunningCalls(); calls != 0 {
+		t.Errorf("frozen container triggered %d IsContainerRunning calls, want 0", calls)
+	}
+}
+
+func TestFrozenContainerResumesAfterUnfreeze(t *testing.T) {
+	m, ms, md, mc, _, _ := newTestManager()
+
+	dockerID := "abcdef123456789000"
+	containerID := dockerID[:12]
+
+	md.AddContainer(dockerID, "test", true)
+	ms.RegisterContainer(dockerID, "test")
+	ms.SetLimit(containerID, model.LimitCPU, 100)
+
+	cgPath := "/cgroup/test"
+	mc.CgroupPaths[dockerID] = cgPath
+	mc.CPUUsage[cgPath] = 200_000_000 // 200 seconds (exceeds limit)
+
+	// Start frozen — should not enforce
+	m.mu.Lock()
+	m.frozen[containerID] = true
+	m.enforced[containerID] = make(map[model.LimitType]bool)
+	m.mu.Unlock()
+
+	m.checkAndEnforce(nil, containerID, dockerID, false)
+	paused, _ := md.IsContainerPaused(nil, dockerID)
+	if paused {
+		t.Error("frozen container should not be paused by enforcement")
+	}
+
+	// Unfreeze — next tick should enforce
+	m.mu.Lock()
+	m.frozen[containerID] = false
+	m.mu.Unlock()
+
+	m.checkAndEnforce(nil, containerID, dockerID, false)
+	paused, _ = md.IsContainerPaused(nil, dockerID)
+	if !paused {
+		t.Error("unfrozen container should be paused when CPU limit exceeded")
+	}
+}
+
 func TestEnforcementEmitsEnforcementChange(t *testing.T) {
 	m, ms, md, mc, _, bus := newTestManager()
 

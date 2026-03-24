@@ -160,6 +160,16 @@ func (m *Manager) enforcementLoop(ctx context.Context, containerID, dockerID str
 }
 
 func (m *Manager) checkAndEnforce(ctx context.Context, containerID, dockerID string, slept bool) {
+	// Fast path: frozen containers are Docker-paused with byte-sec
+	// accumulators suspended — no usage changes, so skip all expensive
+	// Docker API calls, cgroup reads, and SQLite writes.
+	m.mu.Lock()
+	isFrozen := m.frozen[containerID]
+	m.mu.Unlock()
+	if isFrozen {
+		return
+	}
+
 	// Check if container is still running
 	running, err := m.docker.IsContainerRunning(ctx, dockerID)
 	if err != nil || !running {
