@@ -26,19 +26,40 @@ func eventsCmd() *cobra.Command {
 		Long: `Subscribe to a live event stream from ddld via WebSocket.
 
 Event types:
-  usage_update        Per-container usage snapshot (every ~1s per container)
-  limit_change        A limit was set, increased, or decreased
-  enforcement_change  Enforcement was applied or released
-  container_register  A new container was registered
-  container_remove    A container was removed from management
-  container_frozen    A container was frozen (paused + byte-sec suspended)
-  container_unfrozen  A container was unfrozen
-  ollama_enqueue      An Ollama inference request was queued
-  ollama_dequeue      An Ollama inference request completed
-  ollama_cancel       An Ollama inference request was cancelled
-  ollama_bid_change   A container's Ollama bid was changed
-  container_killed      A container was killed due to resource limit
-  proxy_upstream_error  An upstream LLM API returned an error
+  usage_update               Per-container usage snapshot (every ~1s per container)
+  limit_change               A limit was set, increased, or decreased
+  enforcement_change         Enforcement was applied or released
+  global_enforcement_change  A global limit was enforced or released
+  container_register         A new container was registered
+  container_remove           A container was removed from management
+  container_frozen           A container was frozen (paused + byte-sec suspended)
+  container_unfrozen         A container was unfrozen
+  container_killed           A container was killed due to resource limit
+  proxy_upstream_error       An upstream LLM API returned an error
+  system_sleep               Host sleep detected (VM suspend/resume)
+  ollama_enqueue             An Ollama inference request was queued
+  ollama_dequeue             An Ollama inference request completed
+  ollama_cancel              An Ollama inference request was cancelled
+  ollama_bid_change          A container's Ollama bid was changed
+
+Event payloads (visible with --raw):
+  All events include: type, container_id, timestamp, data
+
+  usage_update               {usage: {<type>: int}, limits: {<type>: int}, enforced: {<type>: bool}}
+  limit_change               {limit_type, old_value, new_value, operation}
+  enforcement_change         {limit_type, enforced}
+  global_enforcement_change  {limit_type, enforced}
+  container_register         {docker_id, name}
+  container_remove           {}
+  container_frozen           {}
+  container_unfrozen         {enforcement_active}
+  container_killed           {limit_type, usage_at_kill, limit_at_kill}
+  proxy_upstream_error       {host, status_code, error_type, error_message, request_id}
+  system_sleep               {duration_seconds}
+  ollama_enqueue             {model, bid}
+  ollama_dequeue             {model, wall_seconds, cost}
+  ollama_cancel              {reason}
+  ollama_bid_change          {bid}
 
 Examples:
   ddl events                                    # stream all events
