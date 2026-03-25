@@ -244,6 +244,45 @@ tbody tr.enforced-row {
     gap: 6px;
 }
 
+/* Bulk selection */
+.bulk-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 12px;
+}
+
+.bulk-count {
+    font-weight: 600;
+    font-size: 13px;
+    margin-right: 4px;
+}
+
+.col-check {
+    width: 40px;
+    text-align: center;
+}
+
+td.col-check {
+    text-align: center;
+}
+
+td.col-check input[type="checkbox"] {
+    cursor: pointer;
+}
+
+tbody tr.selected-row {
+    background: rgba(37, 99, 235, 0.08);
+}
+
+tbody tr.selected-row.enforced-row {
+    background: rgba(220, 38, 38, 0.1);
+}
+
 .empty-msg {
     text-align: center;
     padding: 48px 24px;

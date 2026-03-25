@@ -36,9 +36,19 @@
             <div id="global-limits"></div>
         </div>
 
+        <div id="bulk-toolbar" class="bulk-toolbar" hidden>
+            <span class="bulk-count" id="bulk-count"></span>
+            <button class="btn btn-sm" id="bulk-freeze">Freeze</button>
+            <button class="btn btn-sm" id="bulk-unfreeze">Unfreeze</button>
+            <button class="btn btn-sm" id="bulk-set-limit">Set Limit</button>
+            <button class="btn btn-sm" id="bulk-clone">Clone</button>
+            <button class="btn btn-sm btn-danger" id="bulk-remove">Remove</button>
+        </div>
+
         <table id="container-table">
             <thead>
                 <tr>
+                    <th class="col-check"><input type="checkbox" id="select-all"></th>
                     <th>ID</th>
                     <th>Name</th>
                     <th>Status</th>
@@ -96,6 +106,7 @@
         <form method="dialog">
             <h3>Modify Limit</h3>
             <input type="hidden" id="limit-container-id">
+            <input type="hidden" id="bulk-limit-mode" value="">
             <label>Type
                 <select id="limit-type">
                     <option value="cpu">CPU</option>
