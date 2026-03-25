@@ -1302,6 +1302,123 @@ func TestKeepLimitsConsistentCannotEnableWhenInconsistent(t *testing.T) {
 	}
 }
 
+func TestKeepLimitsConsistentFactorsAccumulatedUsage(t *testing.T) {
+	ms := testutil.NewMockStore()
+	md := testutil.NewMockDocker()
+	me := testutil.NewMockEnforcement()
+	bus := events.NewBus()
+	px := proxy.NewSpendingTracker(nil)
+	srv := NewServer(ms, md, me, px, bus, nil)
+	srv.keepLimitsConsistent = true
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Register container and set global limit
+	dockerID := "aaaaaaaaaaaa000001"
+	c, _ := ms.RegisterContainer(dockerID, "alive")
+	ms.SetGlobalLimit(model.LimitSpending, 1000) // $10
+
+	// Simulate accumulated spending from dead containers
+	ms.GlobalUsageAccum[model.LimitSpending] = 600 // $6 spent by dead containers
+
+	// Try to set per-container limit to 500 ($5) — should be capped to 400 ($4)
+	// because maxAllowed = 1000 - 0 (other containers) - 600 (accum) = 400
+	body, _ := json.Marshal(map[string]interface{}{
+		"type":      "spending",
+		"value":     500,
+		"operation": "set",
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/containers/"+c.ID+"/limits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT limits: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 209 {
+		t.Fatalf("status = %d, want 209 (partial)", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["applied"] != "partial" {
+		t.Errorf("applied = %v, want partial", result["applied"])
+	}
+	if int64(result["value"].(float64)) != 400 {
+		t.Errorf("value = %v, want 400", result["value"])
+	}
+
+	// Try to increase by 100 — should be rejected because already at max
+	ms.SetLimit(c.ID, model.LimitSpending, 400) // set to the capped value
+	body, _ = json.Marshal(map[string]interface{}{
+		"type":      "spending",
+		"value":     100,
+		"operation": "increase",
+	})
+	req, _ = http.NewRequest(http.MethodPut, ts.URL+"/containers/"+c.ID+"/limits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT limits increase: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != 400 {
+		t.Errorf("increase status = %d, want 400", resp2.StatusCode)
+	}
+
+	// Try to decrease global limit below accum + container limits
+	// accum=600 + container=400 = 1000, so decreasing to 900 should fail
+	body, _ = json.Marshal(map[string]interface{}{
+		"type":      "spending",
+		"value":     100,
+		"operation": "decrease",
+	})
+	req, _ = http.NewRequest(http.MethodPut, ts.URL+"/global-limits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp3, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT global-limits decrease: %v", err)
+	}
+	defer resp3.Body.Close()
+
+	if resp3.StatusCode != 400 {
+		t.Errorf("global decrease status = %d, want 400", resp3.StatusCode)
+	}
+}
+
+func TestKeepLimitsConsistentCannotEnableWithAccumExceeding(t *testing.T) {
+	ms := testutil.NewMockStore()
+	md := testutil.NewMockDocker()
+	me := testutil.NewMockEnforcement()
+	bus := events.NewBus()
+	px := proxy.NewSpendingTracker(nil)
+	srv := NewServer(ms, md, me, px, bus, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Set global limit and accumulated usage that exceeds it
+	ms.SetGlobalLimit(model.LimitSpending, 500)
+	ms.GlobalUsageAccum[model.LimitSpending] = 600 // accum alone exceeds global
+
+	// Try to enable keep_limits_consistent → should fail
+	body, _ := json.Marshal(map[string]interface{}{
+		"keep_limits_consistent": true,
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT /config: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
 func TestConfigPersistence(t *testing.T) {
 	ms := testutil.NewMockStore()
 	md := testutil.NewMockDocker()

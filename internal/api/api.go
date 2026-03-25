@@ -196,9 +196,13 @@ func (s *Server) handleGlobalLimits(w http.ResponseWriter, r *http.Request) {
 		// Keep-limits-consistent validation for global limit decrease/set-lower
 		if s.keepLimitsConsistent && op != "increase" {
 			sumLimits := s.sumContainerLimits(lt, "")
+			// Factor in accumulated usage from removed containers
+			if accum, err := s.store.GetGlobalUsageAccum(); err == nil {
+				sumLimits += accum[lt]
+			}
 			if sumLimits > 0 && newValue < sumLimits {
 				writeJSON400(w, map[string]interface{}{
-					"error":     fmt.Sprintf("global %s limit cannot be less than sum of per-container limits (%d); min value: %d", lt, sumLimits, sumLimits),
+					"error":     fmt.Sprintf("global %s limit cannot be less than sum of per-container limits + accumulated usage from removed containers (%d); min value: %d", lt, sumLimits, sumLimits),
 					"min_value": sumLimits,
 				})
 				return
@@ -481,6 +485,10 @@ func (s *Server) handleLimits(w http.ResponseWriter, r *http.Request, containerI
 			globalLimit, _ := s.store.GetGlobalLimit(lt)
 			if globalLimit > 0 {
 				sumOther := s.sumContainerLimits(lt, containerID)
+				// Factor in accumulated usage from removed containers
+				if accum, err := s.store.GetGlobalUsageAccum(); err == nil {
+					sumOther += accum[lt]
+				}
 				maxAllowed := globalLimit - sumOther
 				if maxAllowed < 0 {
 					maxAllowed = 0
@@ -1275,13 +1283,17 @@ func (s *Server) validateCurrentLimitsConsistent() error {
 	if err != nil {
 		return fmt.Errorf("failed to read global limits: %w", err)
 	}
+	accum, _ := s.store.GetGlobalUsageAccum()
 	for lt, globalLimit := range globalLimits {
 		if globalLimit == 0 {
 			continue
 		}
 		sum := s.sumContainerLimits(lt, "")
+		if accum != nil {
+			sum += accum[lt]
+		}
 		if sum > globalLimit {
-			return fmt.Errorf("sum of per-container %s limits (%d) exceeds global limit (%d)", lt, sum, globalLimit)
+			return fmt.Errorf("sum of per-container %s limits + accumulated usage from removed containers (%d) exceeds global limit (%d)", lt, sum, globalLimit)
 		}
 	}
 	return nil
