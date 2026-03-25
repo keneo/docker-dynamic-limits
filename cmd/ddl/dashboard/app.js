@@ -8,6 +8,7 @@
     let globalEnforced = {};
     let selectedID = null;
     let refreshTimer = null;
+    let selectedIDs = new Set();
 
     // --- DOM refs ---
     const tbody = document.getElementById('container-tbody');
@@ -180,9 +181,17 @@
         tbody.innerHTML = '';
         if (containers.length === 0) {
             emptyMsg.hidden = false;
+            updateBulkToolbar();
             return;
         }
         emptyMsg.hidden = true;
+
+        // Prune selectedIDs to only keep IDs still in the list
+        var currentIDs = {};
+        containers.forEach(function (cs) { currentIDs[cs.container.id] = true; });
+        selectedIDs.forEach(function (id) {
+            if (!currentIDs[id]) selectedIDs.delete(id);
+        });
 
         containers.forEach(function (cs) {
             var c = cs.container;
@@ -196,7 +205,10 @@
             }
 
             var tr = document.createElement('tr');
-            if (enforcedCount > 0) tr.className = 'enforced-row';
+            var classes = [];
+            if (enforcedCount > 0) classes.push('enforced-row');
+            if (selectedIDs.has(c.id)) classes.push('selected-row');
+            tr.className = classes.join(' ');
 
             var state = cs.state || 'unknown';
             var stateClass = 'state-badge state-' + state;
@@ -204,12 +216,33 @@
             var frozenBadge = cs.frozen ? ' <span class="frozen-badge">FROZEN</span>' : '';
 
             tr.innerHTML =
+                '<td class="col-check"><input type="checkbox"' + (selectedIDs.has(c.id) ? ' checked' : '') + '></td>' +
                 '<td><code>' + esc(c.id) + '</code></td>' +
                 '<td>' + esc(c.name || '-') + frozenBadge + '</td>' +
                 '<td><span class="' + stateClass + '">' + esc(state) + '</span></td>' +
                 '<td>' + limitCount + '</td>' +
                 '<td>' + enforcedCount + (enforcedCount > 0 ? ' <span class="enforced-badge">ENFORCED</span>' : '') + '</td>' +
                 '<td class="actions"></td>';
+
+            // Wire checkbox
+            var cb = tr.querySelector('input[type="checkbox"]');
+            cb.onchange = (function (id) {
+                return function () {
+                    if (this.checked) {
+                        selectedIDs.add(id);
+                    } else {
+                        selectedIDs.delete(id);
+                    }
+                    // Update row style
+                    var row = this.closest('tr');
+                    if (this.checked) {
+                        row.classList.add('selected-row');
+                    } else {
+                        row.classList.remove('selected-row');
+                    }
+                    updateBulkToolbar();
+                };
+            })(c.id);
 
             var actions = tr.querySelector('.actions');
 
@@ -241,6 +274,32 @@
 
             tbody.appendChild(tr);
         });
+
+        // Wire select-all checkbox
+        var selectAllCb = document.getElementById('select-all');
+        selectAllCb.onchange = function () {
+            var checked = this.checked;
+            containers.forEach(function (cs) {
+                if (checked) {
+                    selectedIDs.add(cs.container.id);
+                } else {
+                    selectedIDs.delete(cs.container.id);
+                }
+            });
+            // Update all row checkboxes
+            tbody.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
+                cb.checked = checked;
+                var row = cb.closest('tr');
+                if (checked) {
+                    row.classList.add('selected-row');
+                } else {
+                    row.classList.remove('selected-row');
+                }
+            });
+            updateBulkToolbar();
+        };
+
+        updateBulkToolbar();
     }
 
     function renderDetail() {
@@ -542,7 +601,113 @@
         };
     }
 
+    // --- Bulk selection ---
+    function updateBulkToolbar() {
+        var toolbar = document.getElementById('bulk-toolbar');
+        var countEl = document.getElementById('bulk-count');
+        var selectAllCb = document.getElementById('select-all');
+
+        if (selectedIDs.size === 0) {
+            toolbar.hidden = true;
+            if (selectAllCb) {
+                selectAllCb.checked = false;
+                selectAllCb.indeterminate = false;
+            }
+            return;
+        }
+
+        toolbar.hidden = false;
+        countEl.textContent = selectedIDs.size + ' selected';
+
+        if (selectAllCb) {
+            if (selectedIDs.size === containers.length) {
+                selectAllCb.checked = true;
+                selectAllCb.indeterminate = false;
+            } else {
+                selectAllCb.checked = false;
+                selectAllCb.indeterminate = true;
+            }
+        }
+    }
+
+    function bulkOperation(ids, opFn, label) {
+        var total = ids.length;
+        var ok = 0;
+        var fail = 0;
+        var chain = Promise.resolve();
+        ids.forEach(function (id) {
+            chain = chain.then(function () {
+                return opFn(id).then(function () {
+                    ok++;
+                }).catch(function () {
+                    fail++;
+                });
+            });
+        });
+        return chain.then(function () {
+            var msg = label + ': ' + ok + '/' + total + ' succeeded';
+            if (fail > 0) msg += ', ' + fail + ' failed';
+            toast(msg, fail > 0);
+            selectedIDs.clear();
+            refresh();
+        });
+    }
+
+    function bulkFreeze() {
+        var ids = Array.from(selectedIDs);
+        bulkOperation(ids, function (id) {
+            return api('POST', '/containers/' + id + '/freeze', {});
+        }, 'Freeze');
+    }
+
+    function bulkUnfreeze() {
+        var ids = Array.from(selectedIDs);
+        bulkOperation(ids, function (id) {
+            return api('POST', '/containers/' + id + '/unfreeze', {});
+        }, 'Unfreeze');
+    }
+
+    function bulkClone() {
+        var ids = Array.from(selectedIDs);
+        bulkOperation(ids, function (id) {
+            return api('POST', '/containers/' + id + '/clone', {});
+        }, 'Clone');
+    }
+
+    function bulkRemove() {
+        var count = selectedIDs.size;
+        var dialog = document.getElementById('confirm-dialog');
+        document.getElementById('confirm-title').textContent = 'Remove ' + count + ' Containers';
+        document.getElementById('confirm-message').textContent = 'Remove ' + count + ' selected containers from management?';
+        dialog.showModal();
+        dialog.onclose = function () {
+            if (dialog.returnValue === 'confirm') {
+                var ids = Array.from(selectedIDs);
+                bulkOperation(ids, function (id) {
+                    return api('DELETE', '/containers/' + id);
+                }, 'Remove');
+            }
+        };
+    }
+
+    function bulkSetLimit() {
+        document.getElementById('bulk-limit-mode').value = '1';
+        document.getElementById('limit-container-id').value = '';
+        document.getElementById('limit-type').value = 'cpu';
+        document.getElementById('limit-operation').value = 'set';
+        document.getElementById('limit-value').value = '';
+        document.getElementById('limit-dialog').showModal();
+    }
+
+    // Wire bulk toolbar buttons
+    document.getElementById('bulk-freeze').addEventListener('click', bulkFreeze);
+    document.getElementById('bulk-unfreeze').addEventListener('click', bulkUnfreeze);
+    document.getElementById('bulk-clone').addEventListener('click', bulkClone);
+    document.getElementById('bulk-remove').addEventListener('click', bulkRemove);
+    document.getElementById('bulk-set-limit').addEventListener('click', bulkSetLimit);
+
     function openLimitDialog(containerID, type, operation) {
+        document.getElementById('bulk-limit-mode').value = '';
         document.getElementById('limit-container-id').value = containerID;
         document.getElementById('limit-type').value = type;
         document.getElementById('limit-operation').value = operation;
@@ -573,7 +738,7 @@
     document.getElementById('limit-dialog').addEventListener('close', function () {
         var dialog = this;
         if (dialog.returnValue !== 'cancel') {
-            var containerID = document.getElementById('limit-container-id').value;
+            var isBulk = document.getElementById('bulk-limit-mode').value === '1';
             var type = document.getElementById('limit-type').value;
             var operation = document.getElementById('limit-operation').value;
             var rawValue = document.getElementById('limit-value').value.trim();
@@ -585,17 +750,30 @@
                 return;
             }
 
-            api('PUT', '/containers/' + containerID + '/limits', {
-                type: type,
-                value: value,
-                operation: operation
-            }).then(function () {
-                toast('Limit ' + operation + ': ' + type);
-                refresh();
-            }).catch(function (err) {
-                toast('Limit failed: ' + err.message, true);
-            });
+            if (isBulk) {
+                var ids = Array.from(selectedIDs);
+                bulkOperation(ids, function (id) {
+                    return api('PUT', '/containers/' + id + '/limits', {
+                        type: type,
+                        value: value,
+                        operation: operation
+                    });
+                }, 'Set limit ' + type);
+            } else {
+                var containerID = document.getElementById('limit-container-id').value;
+                api('PUT', '/containers/' + containerID + '/limits', {
+                    type: type,
+                    value: value,
+                    operation: operation
+                }).then(function () {
+                    toast('Limit ' + operation + ': ' + type);
+                    refresh();
+                }).catch(function (err) {
+                    toast('Limit failed: ' + err.message, true);
+                });
+            }
         }
+        document.getElementById('bulk-limit-mode').value = '';
     });
 
     document.getElementById('detail-close').addEventListener('click', function () {
@@ -714,7 +892,8 @@
         { key: 'ollama-queue-size', json: 'ollama_queue_size' },
         { key: 'ollama-timeout', json: 'ollama_timeout' },
         { key: 'ollama-default-bid', json: 'ollama_default_bid' },
-        { key: 'error-webhooks', json: 'error_webhooks', isList: true }
+        { key: 'error-webhooks', json: 'error_webhooks', isList: true },
+        { key: 'keep-limits-consistent', json: 'keep_limits_consistent' }
     ];
 
     configToggle.addEventListener('click', function () {

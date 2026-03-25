@@ -690,6 +690,11 @@ func (m *Manager) globalEnforce(ctx context.Context, lt model.LimitType, contain
 		m.enforce(ctx, c.ID, c.DockerID, lt, cgroupPath)
 	}
 
+	// Block all proxy API calls when global spending limit is exceeded
+	if lt == model.LimitSpending && m.proxy != nil {
+		m.proxy.SetGlobalSpendingBlocked(true)
+	}
+
 	m.mu.Lock()
 	m.globalEnforced[lt] = true
 	m.mu.Unlock()
@@ -704,6 +709,11 @@ func (m *Manager) globalEnforce(ctx context.Context, lt model.LimitType, contain
 
 func (m *Manager) globalRelease(ctx context.Context, lt model.LimitType, containers []model.Container) {
 	log.Printf("[enforcement] global limit %s released, releasing all containers", lt)
+
+	// Unblock proxy API calls when global spending limit is released
+	if lt == model.LimitSpending && m.proxy != nil {
+		m.proxy.SetGlobalSpendingBlocked(false)
+	}
 
 	// Clear global enforced first so isOtherPauseActive sees updated state
 	m.mu.Lock()

@@ -546,6 +546,55 @@ func TestFrozenContainerResumesAfterUnfreeze(t *testing.T) {
 	}
 }
 
+func TestGlobalSpendingEnforcementBlocksProxy(t *testing.T) {
+	m, ms, md, mc, mp, _ := newTestManager()
+
+	dockerID1 := "aaaaaaaaaaaa000000"
+	dockerID2 := "bbbbbbbbbbbb000000"
+	containerID1 := dockerID1[:12]
+	containerID2 := dockerID2[:12]
+
+	md.AddContainer(dockerID1, "c1", true)
+	md.AddContainer(dockerID2, "c2", true)
+	ms.RegisterContainer(dockerID1, "c1")
+	ms.RegisterContainer(dockerID2, "c2")
+
+	cgPath1 := "/cgroup/c1"
+	cgPath2 := "/cgroup/c2"
+	mc.CgroupPaths[dockerID1] = cgPath1
+	mc.CgroupPaths[dockerID2] = cgPath2
+
+	// Set spending usage in store (global enforcement reads from store)
+	ms.SetUsage(containerID1, model.LimitSpending, 400)
+	ms.SetUsage(containerID2, model.LimitSpending, 300)
+
+	// Set global spending limit at 600 (total usage 700 exceeds it)
+	ms.SetGlobalLimit(model.LimitSpending, 600)
+
+	m.checkGlobalEnforcement(nil)
+
+	// Proxy should be globally blocked
+	if !mp.IsGlobalSpendingBlocked() {
+		t.Error("global spending enforcement should set proxy blocked flag")
+	}
+
+	if !m.IsGlobalEnforced(model.LimitSpending) {
+		t.Error("global spending should be marked as enforced")
+	}
+
+	// Now increase global limit so usage < limit → should release
+	ms.SetGlobalLimit(model.LimitSpending, 1000)
+	m.checkGlobalEnforcement(nil)
+
+	if mp.IsGlobalSpendingBlocked() {
+		t.Error("global spending enforcement should clear proxy blocked flag after release")
+	}
+
+	if m.IsGlobalEnforced(model.LimitSpending) {
+		t.Error("global spending should not be marked as enforced after release")
+	}
+}
+
 func TestEnforcementEmitsEnforcementChange(t *testing.T) {
 	m, ms, md, mc, _, bus := newTestManager()
 

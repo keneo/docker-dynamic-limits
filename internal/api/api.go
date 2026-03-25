@@ -37,8 +37,9 @@ type Server struct {
 	ipMap map[string]string // IP → containerID
 	done  chan struct{}
 
-	webhookMu     sync.RWMutex
-	errorWebhooks []string
+	webhookMu            sync.RWMutex
+	errorWebhooks        []string
+	keepLimitsConsistent bool
 }
 
 // NewServer creates a new API server. oq may be nil when Ollama is not configured.
@@ -172,8 +173,13 @@ func (s *Server) handleGlobalLimits(w http.ResponseWriter, r *http.Request) {
 		oldValue, _ := s.store.GetGlobalLimit(lt)
 		var newValue int64
 
-		switch req.Operation {
-		case "set", "":
+		op := req.Operation
+		if op == "" {
+			op = "set"
+		}
+
+		switch op {
+		case "set":
 			newValue = req.Value
 		case "increase":
 			newValue = oldValue + req.Value
@@ -187,16 +193,24 @@ func (s *Server) handleGlobalLimits(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Keep-limits-consistent validation for global limit decrease/set-lower
+		if s.keepLimitsConsistent && op != "increase" {
+			sumLimits := s.sumContainerLimits(lt, "")
+			if sumLimits > 0 && newValue < sumLimits {
+				writeJSON400(w, map[string]interface{}{
+					"error":     fmt.Sprintf("global %s limit cannot be less than sum of per-container limits (%d); min value: %d", lt, sumLimits, sumLimits),
+					"min_value": sumLimits,
+				})
+				return
+			}
+		}
+
 		if err := s.store.SetGlobalLimit(lt, newValue); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 
 		if s.bus != nil {
-			op := req.Operation
-			if op == "" {
-				op = "set"
-			}
 			s.bus.PublishData(events.LimitChange, "", events.LimitChangeData{
 				LimitType: req.Type,
 				OldValue:  oldValue,
@@ -206,8 +220,11 @@ func (s *Server) handleGlobalLimits(w http.ResponseWriter, r *http.Request) {
 		}
 
 		writeJSON(w, map[string]interface{}{
-			"type":  req.Type,
-			"value": newValue,
+			"type":      req.Type,
+			"value":     newValue,
+			"old_value": oldValue,
+			"operation": op,
+			"applied":   "full",
 		})
 
 	default:
@@ -436,8 +453,13 @@ func (s *Server) handleLimits(w http.ResponseWriter, r *http.Request, containerI
 		oldValue, _ := s.store.GetLimit(containerID, lt)
 		var newValue int64
 
-		switch req.Operation {
-		case "set", "":
+		op := req.Operation
+		if op == "" {
+			op = "set"
+		}
+
+		switch op {
+		case "set":
 			newValue = req.Value
 		case "increase":
 			newValue = oldValue + req.Value
@@ -449,6 +471,38 @@ func (s *Server) handleLimits(w http.ResponseWriter, r *http.Request, containerI
 		default:
 			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid operation: %s", req.Operation))
 			return
+		}
+
+		// Keep-limits-consistent validation
+		applied := "full"
+		requestedValue := newValue
+		var reason string
+		if s.keepLimitsConsistent && op != "decrease" {
+			globalLimit, _ := s.store.GetGlobalLimit(lt)
+			if globalLimit > 0 {
+				sumOther := s.sumContainerLimits(lt, containerID)
+				maxAllowed := globalLimit - sumOther
+				if maxAllowed < 0 {
+					maxAllowed = 0
+				}
+				if newValue > maxAllowed {
+					if op == "increase" {
+						maxIncrease := maxAllowed - oldValue
+						if maxIncrease < 0 {
+							maxIncrease = 0
+						}
+						writeJSON400(w, map[string]interface{}{
+							"error":        fmt.Sprintf("would exceed global %s limit (%d); max increase: %d", lt, globalLimit, maxIncrease),
+							"max_increase": maxIncrease,
+						})
+						return
+					}
+					// op == "set": auto-cap
+					applied = "partial"
+					reason = fmt.Sprintf("capped to stay within global limit (%d available)", maxAllowed)
+					newValue = maxAllowed
+				}
+			}
 		}
 
 		if err := s.store.SetLimit(containerID, lt, newValue); err != nil {
@@ -473,10 +527,6 @@ func (s *Server) handleLimits(w http.ResponseWriter, r *http.Request, containerI
 		s.enforcement.NotifyLimitChanged(containerID)
 
 		if s.bus != nil {
-			op := req.Operation
-			if op == "" {
-				op = "set"
-			}
 			s.bus.PublishData(events.LimitChange, containerID, events.LimitChangeData{
 				LimitType: req.Type,
 				OldValue:  oldValue,
@@ -485,10 +535,22 @@ func (s *Server) handleLimits(w http.ResponseWriter, r *http.Request, containerI
 			})
 		}
 
-		writeJSON(w, map[string]interface{}{
-			"type":  req.Type,
-			"value": newValue,
-		})
+		resp := map[string]interface{}{
+			"type":      req.Type,
+			"value":     newValue,
+			"old_value": oldValue,
+			"operation": op,
+			"applied":   applied,
+		}
+		if applied == "partial" {
+			resp["requested_value"] = requestedValue
+			resp["reason"] = reason
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(209)
+			json.NewEncoder(w).Encode(resp)
+		} else {
+			writeJSON(w, resp)
+		}
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -980,6 +1042,8 @@ func (s *Server) buildConfigResponse() map[string]interface{} {
 	result["error_webhooks"] = s.errorWebhooks
 	s.webhookMu.RUnlock()
 
+	result["keep_limits_consistent"] = s.keepLimitsConsistent
+
 	return result
 }
 
@@ -1090,6 +1154,19 @@ func (s *Server) applyConfig(st *proxy.SpendingTracker, req map[string]interface
 			s.errorWebhooks = urls
 			s.webhookMu.Unlock()
 			log.Printf("[api] error webhooks configured: %v", urls)
+		case "keep_limits_consistent":
+			b, ok := val.(bool)
+			if !ok {
+				return fmt.Errorf("keep_limits_consistent: expected bool")
+			}
+			if b {
+				// Validate that current limits are consistent before enabling
+				if err := s.validateCurrentLimitsConsistent(); err != nil {
+					return fmt.Errorf("cannot enable keep_limits_consistent: %s", err.Error())
+				}
+			}
+			s.keepLimitsConsistent = b
+			log.Printf("[api] keep_limits_consistent = %v", b)
 		default:
 			return fmt.Errorf("unknown config key: %s", key)
 		}
@@ -1191,6 +1268,43 @@ func (s *Server) callErrorWebhooks(info proxy.UpstreamErrorInfo, containerName s
 	}
 }
 
+// validateCurrentLimitsConsistent checks that for every limit type with a global limit,
+// the sum of per-container limits does not exceed the global limit.
+func (s *Server) validateCurrentLimitsConsistent() error {
+	globalLimits, err := s.store.GetAllGlobalLimits()
+	if err != nil {
+		return fmt.Errorf("failed to read global limits: %w", err)
+	}
+	for lt, globalLimit := range globalLimits {
+		if globalLimit == 0 {
+			continue
+		}
+		sum := s.sumContainerLimits(lt, "")
+		if sum > globalLimit {
+			return fmt.Errorf("sum of per-container %s limits (%d) exceeds global limit (%d)", lt, sum, globalLimit)
+		}
+	}
+	return nil
+}
+
+// sumContainerLimits returns the sum of per-container limits for the given limit type,
+// optionally excluding one container.
+func (s *Server) sumContainerLimits(lt model.LimitType, excludeID string) int64 {
+	containers, err := s.store.ListContainers()
+	if err != nil {
+		return 0
+	}
+	var sum int64
+	for _, c := range containers {
+		if c.ID == excludeID {
+			continue
+		}
+		lim, _ := s.store.GetLimit(c.ID, lt)
+		sum += lim
+	}
+	return sum
+}
+
 // --- Freeze/Unfreeze ---
 
 func (s *Server) handleFreeze(w http.ResponseWriter, r *http.Request, containerID string) {
@@ -1290,4 +1404,10 @@ func writeError(w http.ResponseWriter, code int, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+}
+
+func writeJSON400(w http.ResponseWriter, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	json.NewEncoder(w).Encode(v)
 }

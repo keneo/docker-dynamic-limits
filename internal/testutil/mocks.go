@@ -691,11 +691,12 @@ func (e *MockEnforcement) IsFrozen(containerID string) bool {
 
 // MockProxy implements proxy.SpendingProxy with in-memory state.
 type MockProxy struct {
-	mu       sync.Mutex
-	Spending map[string]int64
-	Budgets  map[string]int64
-	Addrs    map[string]string
-	Activity map[string][]proxy.ProxyActivity
+	mu                    sync.Mutex
+	Spending              map[string]int64
+	Budgets               map[string]int64
+	Addrs                 map[string]string
+	Activity              map[string][]proxy.ProxyActivity
+	GlobalSpendingBlocked bool
 }
 
 func NewMockProxy() *MockProxy {
@@ -766,4 +767,17 @@ func (p *MockProxy) RecordActivity(containerID string, a proxy.ProxyActivity) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.Activity[containerID] = append(p.Activity[containerID], a)
+}
+
+func (p *MockProxy) SetGlobalSpendingBlocked(blocked bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.GlobalSpendingBlocked = blocked
+}
+
+// IsGlobalSpendingBlocked returns the current global spending blocked state.
+func (p *MockProxy) IsGlobalSpendingBlocked() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.GlobalSpendingBlocked
 }

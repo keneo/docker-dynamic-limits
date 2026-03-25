@@ -24,6 +24,7 @@ type SpendingProxy interface {
 	AddSpending(containerID string, milliCents int64)
 	GetActivity(containerID string) []ProxyActivity
 	RecordActivity(containerID string, a ProxyActivity)
+	SetGlobalSpendingBlocked(blocked bool)
 }
 
 // OllamaHandler is the interface the proxy uses to dispatch Ollama requests.
@@ -61,6 +62,8 @@ type SpendingTracker struct {
 	onUpstreamError func(info UpstreamErrorInfo)
 	// errorDedup tracks last webhook fire time per error key to avoid flooding
 	errorDedup map[string]time.Time
+	// globalSpendingBlocked is set by enforcement when global spending limit is exceeded
+	globalSpendingBlocked bool
 }
 
 // UpstreamErrorInfo describes an error returned by an upstream API provider.
@@ -276,6 +279,20 @@ func (st *SpendingTracker) GetEnabledHosts() map[string]bool {
 	return result
 }
 
+// SetGlobalSpendingBlocked sets the global spending blocked flag.
+// When true, all tracked API calls are rejected with 429.
+func (st *SpendingTracker) SetGlobalSpendingBlocked(blocked bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.globalSpendingBlocked = blocked
+}
+
+func (st *SpendingTracker) isGlobalSpendingBlocked() bool {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	return st.globalSpendingBlocked
+}
+
 // RecordActivity appends a proxy activity entry for a container.
 func (st *SpendingTracker) RecordActivity(containerID string, a ProxyActivity) {
 	st.mu.Lock()
@@ -378,6 +395,19 @@ func (st *SpendingTracker) proxyHandler(containerID string) http.Handler {
 				Error:      "spending budget exceeded",
 			})
 			http.Error(w, `{"error":"spending budget exceeded"}`, http.StatusTooManyRequests)
+			return
+		}
+
+		if isAPICall && st.isGlobalSpendingBlocked() {
+			st.RecordActivity(containerID, ProxyActivity{
+				Timestamp:  time.Now(),
+				Host:       stripPort(r.Host),
+				Path:       r.URL.Path,
+				Method:     r.Method,
+				StatusCode: http.StatusTooManyRequests,
+				Error:      "global spending limit exceeded",
+			})
+			http.Error(w, `{"error":"global spending limit exceeded"}`, http.StatusTooManyRequests)
 			return
 		}
 
@@ -628,6 +658,11 @@ func (st *SpendingTracker) handleConnect(containerID string, w http.ResponseWrit
 
 	if st.isTrackedAPI(r.Host) && budget > 0 && spent >= budget {
 		http.Error(w, "spending budget exceeded", http.StatusTooManyRequests)
+		return
+	}
+
+	if st.isTrackedAPI(r.Host) && st.isGlobalSpendingBlocked() {
+		http.Error(w, "global spending limit exceeded", http.StatusTooManyRequests)
 		return
 	}
 

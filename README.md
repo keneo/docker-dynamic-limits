@@ -156,9 +156,11 @@ ddl limits decrease <container> ram 128m
 
 ### Global limits
 
-Global limits apply a shared budget across **all** containers. When the sum of all container usage exceeds a global limit, enforcement is applied to every container.
+Global limits apply a shared budget across **all** containers. When the sum of all container usage exceeds a global limit, enforcement is applied to every container. For spending limits, global enforcement also blocks all tracked API calls through the proxy with HTTP 429 `"global spending limit exceeded"` — this is the global spending kill-switch.
 
 **Usage accumulation**: When a container is removed, its cumulative usage (spending, cpu, net, disk-io-bytes, disk-io-ops, and all byte-second types) is preserved in the global total. Only `ram` and `disk` (current-state metrics) are subtracted when a container is removed. This prevents removing a container from reducing global totals for irreversible resources like money spent or CPU time consumed.
+
+**Keep-limits-consistent mode**: When enabled (`ddl config set keep-limits-consistent true`), the API validates that per-container limits stay within global limits. On per-container `increase` that would exceed the global limit → HTTP 400. On per-container `set` that would exceed → auto-capped to fit, HTTP 209. On global `decrease`/`set` below sum of per-container limits → HTTP 400. Cannot be enabled when current limits are already inconsistent.
 
 ```bash
 ddl limits set-global cpu 24h           # 24 hours of CPU across all containers
@@ -379,6 +381,8 @@ The daemon exposes two interfaces:
 | `PUT` | `/global-limits` | Set/increase/decrease a global limit |
 | `GET` | `/config` | Get runtime configuration (keys masked) |
 | `PUT` | `/config` | Update runtime configuration (persisted to disk) |
+
+**Enhanced limit responses**: All `PUT` limit endpoints return `old_value`, `operation`, and `applied` fields. When `keep-limits-consistent` is enabled and a `set` operation is auto-capped, the response uses HTTP 209 with `applied: "partial"`, `requested_value`, and `reason`.
 
 **Read-only API** (TCP — for containers):
 

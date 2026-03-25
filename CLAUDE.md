@@ -17,7 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Key Requirements
 
 - For each container and each limit type: check current usage, set/increase/decrease limits
-- **Global limits**: shared budgets across all containers — the SUM of all container usage is checked against the global limit. When exceeded, enforcement is applied to ALL containers (same action per limit type as per-container enforcement). The `isOtherPauseActive` check includes global enforcement state to prevent unpausing a container that's globally enforced.
+- **Global limits**: shared budgets across all containers — the SUM of all container usage is checked against the global limit. When exceeded, enforcement is applied to ALL containers (same action per limit type as per-container enforcement). The `isOtherPauseActive` check includes global enforcement state to prevent unpausing a container that's globally enforced. For spending limits, global enforcement sets `globalSpendingBlocked` on the proxy via `SetGlobalSpendingBlocked(true)`, which causes all tracked API calls to be rejected with HTTP 429 `"global spending limit exceeded"`. When the global spending limit is released, the flag is cleared.
 - **Global usage accumulator**: When a container is removed, its cumulative usage (all types except `ram` and `disk`) is accumulated into `global_usage_accum` table. This prevents removing a container from reducing global totals for irreversible resources like spending, CPU time, network, I/O, and byte-seconds. The accumulator is added to the live sum in both the API (`handleContainers`) and enforcement (`checkGlobalEnforcement`).
 - Container cloning capability
 - Containers must be able to query their own limits and usage from inside the container
@@ -39,12 +39,15 @@ The daemon supports runtime configuration via `ddl config get` / `ddl config set
 | `ollama-timeout` | duration | yes | e.g. `2m`, `120s` |
 | `ollama-default-bid` | int | yes | milli-cents/wall-sec |
 | `error-webhooks` | list | yes | Comma-separated webhook URLs |
+| `keep-limits-consistent` | bool | yes | Validate per-container vs global limits |
 
 API: `GET /config` returns all config (keys masked), `PUT /config` accepts partial JSON updates. The dashboard shows config read-only in a collapsible panel.
 
 **Config persistence**: `PUT /config` changes are persisted to a JSON file (`config.json` in the same directory as the SQLite database). On daemon startup, persisted config is loaded and overlaid on environment variable defaults. Only explicitly set keys are persisted.
 
 **Disabled providers**: When a provider (Anthropic, OpenAI, Ollama) is disabled via config, requests from containers to that provider are blocked with HTTP 403 `{"error":"provider disabled in ddl proxy"}`. The check happens early in `proxyHandler` via `isDisabledProvider()` before any forwarding.
+
+**Keep-limits-consistent**: When `keep_limits_consistent` is enabled, the API validates that per-container and global limits stay consistent. Rule: for each limit type, `sum(all per-container limits) ≤ global limit`. On per-container `increase`: if sum would exceed global → HTTP 400 with `max_increase`. On per-container `set`: if would exceed → auto-cap to max allowed, HTTP 209 with `applied: "partial"`. On global `decrease` or `set` lower: if new global < sum of per-container limits → HTTP 400 with `min_value`. Cannot be enabled when current limits are already inconsistent. All limit PUT responses include enhanced fields: `old_value`, `operation`, `applied`.
 
 ## Proxy Activity
 

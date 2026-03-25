@@ -31,8 +31,9 @@ var configKeys = map[string]configKeyInfo{
 	"ollama-models":     {jsonKey: "ollama_models", keyType: "stringlist"},
 	"ollama-queue-size": {jsonKey: "ollama_queue_size", keyType: "int"},
 	"ollama-timeout":    {jsonKey: "ollama_timeout", keyType: "duration"},
-	"ollama-default-bid": {jsonKey: "ollama_default_bid", keyType: "int"},
-	"error-webhooks":     {jsonKey: "error_webhooks", keyType: "stringlist"},
+	"ollama-default-bid":      {jsonKey: "ollama_default_bid", keyType: "int"},
+	"error-webhooks":          {jsonKey: "error_webhooks", keyType: "stringlist"},
+	"keep-limits-consistent":  {jsonKey: "keep_limits_consistent", keyType: "bool"},
 }
 
 // configDisplayOrder defines the order keys are displayed in "config get".
@@ -48,6 +49,7 @@ var configDisplayOrder = []string{
 	"ollama-timeout",
 	"ollama-default-bid",
 	"error-webhooks",
+	"keep-limits-consistent",
 }
 
 func configCmd() *cobra.Command {
@@ -118,6 +120,7 @@ Keys:
   ollama-timeout       duration Request timeout (e.g. 2m, 120s)
   ollama-default-bid   int      Default bid in milli-cents/wall-sec
   error-webhooks       list     Comma-separated webhook URLs for upstream API errors
+  keep-limits-consistent bool   Validate per-container vs global limits consistency
 
 Note: ollama-url changes take effect for the next queued request.`,
 		Args: cobra.ExactArgs(2),

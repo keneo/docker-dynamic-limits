@@ -1049,6 +1049,259 @@ func TestContainersResponseIncludesGlobalLimits(t *testing.T) {
 	}
 }
 
+func TestKeepLimitsConsistentRejectsIncrease(t *testing.T) {
+	ms := testutil.NewMockStore()
+	md := testutil.NewMockDocker()
+	me := testutil.NewMockEnforcement()
+	bus := events.NewBus()
+	px := proxy.NewSpendingTracker(nil)
+	srv := NewServer(ms, md, me, px, bus, nil)
+	srv.keepLimitsConsistent = true
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	dockerID1 := "aaaaaaaaaaaa000000"
+	dockerID2 := "bbbbbbbbbbbb000000"
+	c1, _ := ms.RegisterContainer(dockerID1, "c1")
+	c2, _ := ms.RegisterContainer(dockerID2, "c2")
+	ms.SetGlobalLimit(model.LimitCPU, 100)
+	ms.SetLimit(c1.ID, model.LimitCPU, 60)
+
+	// Increase container 2 CPU by 50 → should be rejected (max increase is 40)
+	body, _ := json.Marshal(map[string]interface{}{
+		"type":      "cpu",
+		"value":     50,
+		"operation": "increase",
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/containers/"+c2.ID+"/limits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT limits: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["max_increase"] == nil {
+		t.Error("expected max_increase in error response")
+	}
+	if result["max_increase"].(float64) != 40 {
+		t.Errorf("max_increase = %v, want 40", result["max_increase"])
+	}
+}
+
+func TestKeepLimitsConsistentCapsSet(t *testing.T) {
+	ms := testutil.NewMockStore()
+	md := testutil.NewMockDocker()
+	me := testutil.NewMockEnforcement()
+	bus := events.NewBus()
+	px := proxy.NewSpendingTracker(nil)
+	srv := NewServer(ms, md, me, px, bus, nil)
+	srv.keepLimitsConsistent = true
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	dockerID1 := "aaaaaaaaaaaa000000"
+	dockerID2 := "bbbbbbbbbbbb000000"
+	c1, _ := ms.RegisterContainer(dockerID1, "c1")
+	c2, _ := ms.RegisterContainer(dockerID2, "c2")
+
+	ms.SetGlobalLimit(model.LimitCPU, 100)
+	ms.SetLimit(c1.ID, model.LimitCPU, 60)
+	_ = c2
+
+	// Set container 2 CPU to 50 → should be capped to 40, HTTP 209
+	body, _ := json.Marshal(map[string]interface{}{
+		"type":      "cpu",
+		"value":     50,
+		"operation": "set",
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/containers/"+c2.ID+"/limits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT limits: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 209 {
+		t.Errorf("status = %d, want 209", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["value"].(float64) != 40 {
+		t.Errorf("value = %v, want 40 (capped)", result["value"])
+	}
+	if result["applied"] != "partial" {
+		t.Errorf("applied = %v, want partial", result["applied"])
+	}
+	if result["requested_value"].(float64) != 50 {
+		t.Errorf("requested_value = %v, want 50", result["requested_value"])
+	}
+}
+
+func TestKeepLimitsConsistentRejectsGlobalDecrease(t *testing.T) {
+	ms := testutil.NewMockStore()
+	md := testutil.NewMockDocker()
+	me := testutil.NewMockEnforcement()
+	bus := events.NewBus()
+	px := proxy.NewSpendingTracker(nil)
+	srv := NewServer(ms, md, me, px, bus, nil)
+	srv.keepLimitsConsistent = true
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	dockerID := "aaaaaaaaaaaa000000"
+	c, _ := ms.RegisterContainer(dockerID, "c1")
+	ms.SetGlobalLimit(model.LimitCPU, 100)
+	ms.SetLimit(c.ID, model.LimitCPU, 60)
+
+	// Decrease global to 50 → should be rejected (min_value: 60)
+	body, _ := json.Marshal(map[string]interface{}{
+		"type":      "cpu",
+		"value":     50,
+		"operation": "decrease",
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/global-limits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT /global-limits: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["min_value"] == nil {
+		t.Error("expected min_value in error response")
+	}
+	if result["min_value"].(float64) != 60 {
+		t.Errorf("min_value = %v, want 60", result["min_value"])
+	}
+}
+
+func TestKeepLimitsConsistentAllowsDecrease(t *testing.T) {
+	ms := testutil.NewMockStore()
+	md := testutil.NewMockDocker()
+	me := testutil.NewMockEnforcement()
+	bus := events.NewBus()
+	px := proxy.NewSpendingTracker(nil)
+	srv := NewServer(ms, md, me, px, bus, nil)
+	srv.keepLimitsConsistent = true
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	dockerID := "aaaaaaaaaaaa000000"
+	c, _ := ms.RegisterContainer(dockerID, "c1")
+	ms.SetGlobalLimit(model.LimitCPU, 100)
+	ms.SetLimit(c.ID, model.LimitCPU, 60)
+
+	// Decrease container CPU limit → always allowed
+	body, _ := json.Marshal(map[string]interface{}{
+		"type":      "cpu",
+		"value":     20,
+		"operation": "decrease",
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/containers/"+c.ID+"/limits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT limits: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["value"].(float64) != 40 {
+		t.Errorf("value = %v, want 40", result["value"])
+	}
+	if result["applied"] != "full" {
+		t.Errorf("applied = %v, want full", result["applied"])
+	}
+}
+
+func TestEnhancedLimitResponse(t *testing.T) {
+	ts, ms, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	dockerID := "abcdef123456789000"
+	c, _ := ms.RegisterContainer(dockerID, "test")
+	ms.SetLimit(c.ID, model.LimitCPU, 100)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"type":      "cpu",
+		"value":     50,
+		"operation": "increase",
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/containers/"+c.ID+"/limits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ := http.DefaultClient.Do(req)
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if result["old_value"].(float64) != 100 {
+		t.Errorf("old_value = %v, want 100", result["old_value"])
+	}
+	if result["operation"] != "increase" {
+		t.Errorf("operation = %v, want increase", result["operation"])
+	}
+	if result["applied"] != "full" {
+		t.Errorf("applied = %v, want full", result["applied"])
+	}
+	if result["value"].(float64) != 150 {
+		t.Errorf("value = %v, want 150", result["value"])
+	}
+}
+
+func TestKeepLimitsConsistentCannotEnableWhenInconsistent(t *testing.T) {
+	ms := testutil.NewMockStore()
+	md := testutil.NewMockDocker()
+	me := testutil.NewMockEnforcement()
+	bus := events.NewBus()
+	px := proxy.NewSpendingTracker(nil)
+	srv := NewServer(ms, md, me, px, bus, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Set up inconsistent state: per-container limits sum > global limit
+	dockerID := "aaaaaaaaaaaa000000"
+	c, _ := ms.RegisterContainer(dockerID, "c1")
+	ms.SetGlobalLimit(model.LimitCPU, 50)
+	ms.SetLimit(c.ID, model.LimitCPU, 100) // exceeds global
+
+	// Try to enable keep_limits_consistent → should fail
+	body, _ := json.Marshal(map[string]interface{}{
+		"keep_limits_consistent": true,
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT /config: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
 func TestConfigPersistence(t *testing.T) {
 	ms := testutil.NewMockStore()
 	md := testutil.NewMockDocker()
