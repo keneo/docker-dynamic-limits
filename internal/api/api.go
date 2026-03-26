@@ -1056,6 +1056,20 @@ func (s *Server) buildConfigResponse() map[string]interface{} {
 }
 
 func (s *Server) applyConfig(st *proxy.SpendingTracker, req map[string]interface{}) error {
+	// Process ollama_url first so lazy init happens before other ollama keys
+	if urlVal, ok := req["ollama_url"]; ok {
+		str, ok := urlVal.(string)
+		if !ok {
+			return fmt.Errorf("ollama_url: expected string")
+		}
+		if s.ollama == nil {
+			s.initOllama(str, st)
+		} else {
+			s.ollama.SetOllamaURL(str)
+		}
+		delete(req, "ollama_url")
+	}
+
 	for key, val := range req {
 		switch key {
 		case "anthropic_enabled":
@@ -1137,14 +1151,7 @@ func (s *Server) applyConfig(st *proxy.SpendingTracker, req map[string]interface
 			}
 			s.ollama.SetDefaultBid(int64(n))
 		case "ollama_url":
-			if s.ollama == nil {
-				return fmt.Errorf("ollama not configured")
-			}
-			str, ok := val.(string)
-			if !ok {
-				return fmt.Errorf("ollama_url: expected string")
-			}
-			s.ollama.SetOllamaURL(str)
+			// Handled before the loop (lazy init)
 		case "error_webhooks":
 			arr, ok := val.([]interface{})
 			if !ok {
@@ -1297,6 +1304,32 @@ func (s *Server) validateCurrentLimitsConsistent() error {
 		}
 	}
 	return nil
+}
+
+// initOllama lazily creates the Ollama queue when ollama_url is set at runtime
+// and the queue wasn't initialized at daemon startup.
+func (s *Server) initOllama(ollamaURL string, st *proxy.SpendingTracker) {
+	cfg := ollama.Config{
+		OllamaURL:      ollamaURL,
+		MaxQueueSize:   50,
+		RequestTimeout: 120 * time.Second,
+	}
+	s.ollama = ollama.NewQueue(cfg, s.proxy, s.store, s.bus)
+	s.ollama.SetActivityRecorder(func(containerID string, act proxy.ProxyActivity) {
+		st.RecordActivity(containerID, act)
+	})
+	st.SetOllamaHandler(s.ollama)
+	st.EnableHost("ollama", true)
+
+	// Restore persisted bids for existing containers
+	if containers, err := s.store.ListContainers(); err == nil {
+		ids := make([]string, len(containers))
+		for i, c := range containers {
+			ids[i] = c.ID
+		}
+		s.ollama.RestoreBids(ids)
+	}
+	log.Printf("[api] Ollama proxy lazily initialized: %s", ollamaURL)
 }
 
 // sumContainerLimits returns the sum of per-container limits for the given limit type,
