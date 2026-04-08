@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 )
@@ -113,5 +117,115 @@ Examples:
 		},
 	})
 
+	cmd.AddCommand(scopeListenCmd())
+	cmd.AddCommand(scopeListenersCmd())
+	cmd.AddCommand(scopeUnlistenCmd())
+
 	return cmd
+}
+
+func scopeListenCmd() *cobra.Command {
+	var port int
+	var socket string
+	cmd := &cobra.Command{
+		Use:   "listen <segment-id>",
+		Short: "Start a scoped API listener for a segment",
+		Long: `Spawn a persistent API listener locked to a segment scope.
+The listener only serves data for containers in that segment.
+
+Examples:
+  ddl scope listen prod --port 7200
+  ddl scope listen prod --socket /tmp/ddl-prod.sock`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			scope := "segment:" + args[0]
+			body := map[string]interface{}{"scope": scope}
+			if socket != "" {
+				body["socket"] = socket
+			} else {
+				body["listen"] = fmt.Sprintf(":%d", port)
+			}
+
+			data, _ := json.Marshal(body)
+			req, _ := http.NewRequest(http.MethodPost, apiURL+"/scoped-listeners",
+				bytes.NewReader(data))
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				return wrapConnErr(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusCreated {
+				return readAPIError(resp)
+			}
+
+			var result map[string]interface{}
+			json.NewDecoder(resp.Body).Decode(&result)
+
+			if jsonOutput {
+				return printJSON(result)
+			}
+			fmt.Printf("scoped listener %s started on %s (scope=%s)\n",
+				result["id"], result["listen"], result["scope"])
+			return nil
+		},
+	}
+	cmd.Flags().IntVar(&port, "port", 7200, "TCP port to listen on")
+	cmd.Flags().StringVar(&socket, "socket", "", "Unix socket path (overrides --port)")
+	return cmd
+}
+
+func scopeListenersCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "listeners",
+		Short: "List active scoped listeners",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiGet("/scoped-listeners")
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return printJSON(resp)
+			}
+			listeners, ok := resp["listeners"].([]interface{})
+			if !ok || len(listeners) == 0 {
+				fmt.Println("No scoped listeners.")
+				return nil
+			}
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintf(w, "ID\tSCOPE\tLISTEN\n")
+			for _, l := range listeners {
+				sl := l.(map[string]interface{})
+				listen := sl["listen"]
+				if s, ok := sl["socket"].(string); ok && s != "" {
+					listen = s
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\n", sl["id"], sl["scope"], listen)
+			}
+			w.Flush()
+			return nil
+		},
+	}
+}
+
+func scopeUnlistenCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unlisten <id>",
+		Short: "Stop a scoped listener",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			req, _ := http.NewRequest(http.MethodDelete, apiURL+"/scoped-listeners/"+args[0], nil)
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				return wrapConnErr(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return readAPIError(resp)
+			}
+			fmt.Printf("scoped listener %s stopped\n", args[0])
+			return nil
+		},
+	}
 }

@@ -40,6 +40,18 @@ type Server struct {
 	webhookMu            sync.RWMutex
 	errorWebhooks        []string
 	keepLimitsConsistent bool
+
+	scopedMu        sync.Mutex
+	scopedListeners map[string]*scopedListener
+}
+
+type scopedListener struct {
+	ID     string      `json:"id"`
+	Scope  model.Scope `json:"scope"`
+	Listen string      `json:"listen,omitempty"`
+	Socket string      `json:"socket,omitempty"`
+	server *http.Server
+	ln     net.Listener
 }
 
 // NewServer creates a new API server. oq may be nil when Ollama is not configured.
@@ -52,9 +64,10 @@ func NewServer(st store.DataStore, dc docker.DockerClient, em enforcement.Enforc
 		proxy:       px,
 		bus:         bus,
 		ollama:      oq,
-		mux:         http.NewServeMux(),
-		ipMap:       make(map[string]string),
-		done:        make(chan struct{}),
+		mux:             http.NewServeMux(),
+		ipMap:           make(map[string]string),
+		done:            make(chan struct{}),
+		scopedListeners: make(map[string]*scopedListener),
 	}
 	if len(configPath) > 0 {
 		s.configPath = configPath[0]
@@ -121,6 +134,9 @@ func (s *Server) registerRoutes() {
 	// Segment management
 	s.mux.HandleFunc("/segments", s.handleSegments)
 	s.mux.HandleFunc("/segments/", s.handleSegmentRoutes)
+	// Scoped listeners management
+	s.mux.HandleFunc("/scoped-listeners", s.handleScopedListeners)
+	s.mux.HandleFunc("/scoped-listeners/", s.handleScopedListenerByID)
 }
 
 // Handler returns the HTTP handler (full API).
@@ -1820,6 +1836,220 @@ func (s *Server) handleSegmentUnfreezeAll(w http.ResponseWriter, r *http.Request
 		}
 	}
 	writeJSON(w, map[string]interface{}{"unfrozen": unfrozen, "count": len(unfrozen)})
+}
+
+// --- Scoped Listeners ---
+
+// ScopedHandler returns an HTTP handler that filters all requests through a scope.
+// For segment scopes: only segment containers visible, segment limits/usage, no host limit modification.
+func (s *Server) ScopedHandler(scope model.Scope) http.Handler {
+	mux := http.NewServeMux()
+
+	// Scoped container list
+	mux.HandleFunc("/containers", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		containers, err := s.store.ListContainersByScope(scope)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		var statuses []map[string]interface{}
+		for _, c := range containers {
+			limits, _ := s.store.GetAllLimits(c.ID)
+			usage, _ := s.store.GetAllUsage(c.ID)
+			enforced := s.enforcement.GetEnforced(c.ID)
+			state := s.getContainerState(c.DockerID)
+			statuses = append(statuses, map[string]interface{}{
+				"container": c,
+				"limits":    limits,
+				"usage":     usage,
+				"enforced":  enforced,
+				"state":     state,
+				"frozen":    s.enforcement.IsFrozen(c.ID),
+			})
+		}
+
+		scopeLimits, _ := s.store.GetAllScopeLimits(scope)
+		scopeEnforced := s.enforcement.GetScopeEnforced(scope)
+
+		// Aggregate usage
+		scopeUsage := make(map[model.LimitType]int64)
+		for _, c := range containers {
+			if u, err := s.store.GetAllUsage(c.ID); err == nil {
+				for lt, v := range u {
+					scopeUsage[lt] += v
+				}
+			}
+		}
+		if accum, err := s.store.GetScopeUsageAccum(scope); err == nil {
+			for lt, v := range accum {
+				scopeUsage[lt] += v
+			}
+		}
+
+		writeJSON(w, map[string]interface{}{
+			"containers":    statuses,
+			"scope":         string(scope),
+			"scope_limits":  scopeLimits,
+			"scope_usage":   scopeUsage,
+			"scope_enforced": scopeEnforced,
+		})
+	})
+
+	// Scoped container detail (delegate to main handler, it resolves by ID)
+	mux.HandleFunc("/containers/", s.handleContainer)
+
+	// Scoped limits
+	mux.HandleFunc("/limits", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			limits, _ := s.store.GetAllScopeLimits(scope)
+			writeJSON(w, limits)
+		case http.MethodPut:
+			if scope.IsSegment() {
+				s.handleSegmentLimits(w, r, scope.SegmentID())
+			} else {
+				s.handleGlobalLimits(w, r)
+			}
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// Scoped usage
+	mux.HandleFunc("/usage", func(w http.ResponseWriter, r *http.Request) {
+		if scope.IsSegment() {
+			s.handleSegmentUsage(w, r, scope.SegmentID())
+		} else {
+			s.handleSelfUsage(w, r)
+		}
+	})
+
+	// Events (unscoped — events carry container_id, client can filter)
+	mux.HandleFunc("/events", s.handleEvents)
+
+	return mux
+}
+
+func (s *Server) handleScopedListeners(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.scopedMu.Lock()
+		result := make([]map[string]interface{}, 0, len(s.scopedListeners))
+		for _, sl := range s.scopedListeners {
+			result = append(result, map[string]interface{}{
+				"id":     sl.ID,
+				"scope":  string(sl.Scope),
+				"listen": sl.Listen,
+				"socket": sl.Socket,
+			})
+		}
+		s.scopedMu.Unlock()
+		writeJSON(w, map[string]interface{}{"listeners": result})
+
+	case http.MethodPost:
+		var req struct {
+			Scope  string `json:"scope"`
+			Listen string `json:"listen"`
+			Socket string `json:"socket"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if req.Listen == "" && req.Socket == "" {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("listen or socket required"))
+			return
+		}
+
+		scope := model.Scope(req.Scope)
+		if scope.IsSegment() {
+			if _, err := s.store.GetSegment(scope.SegmentID()); err != nil {
+				writeError(w, http.StatusNotFound, fmt.Errorf("segment %q not found", scope.SegmentID()))
+				return
+			}
+		}
+
+		id := fmt.Sprintf("sl-%d", time.Now().UnixNano())
+		handler := s.ScopedHandler(scope)
+
+		var ln net.Listener
+		var err error
+		addr := req.Listen
+		if req.Socket != "" {
+			os.Remove(req.Socket) // clean up stale socket
+			ln, err = net.Listen("unix", req.Socket)
+			addr = req.Socket
+		} else {
+			ln, err = net.Listen("tcp", req.Listen)
+			addr = ln.Addr().String()
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Errorf("listen: %w", err))
+			return
+		}
+
+		srv := &http.Server{Handler: handler}
+		go srv.Serve(ln)
+
+		sl := &scopedListener{
+			ID:     id,
+			Scope:  scope,
+			Listen: addr,
+			Socket: req.Socket,
+			server: srv,
+			ln:     ln,
+		}
+
+		s.scopedMu.Lock()
+		s.scopedListeners[id] = sl
+		s.scopedMu.Unlock()
+
+		log.Printf("[api] scoped listener %s started on %s (scope=%s)", id, addr, scope)
+
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(w, map[string]interface{}{
+			"id":     id,
+			"scope":  string(scope),
+			"listen": addr,
+			"socket": req.Socket,
+		})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleScopedListenerByID(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/scoped-listeners/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	s.scopedMu.Lock()
+	sl, ok := s.scopedListeners[id]
+	if ok {
+		delete(s.scopedListeners, id)
+	}
+	s.scopedMu.Unlock()
+
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Errorf("listener %q not found", id))
+		return
+	}
+
+	sl.server.Close()
+	log.Printf("[api] scoped listener %s stopped", id)
+	writeJSON(w, map[string]interface{}{"deleted": id})
 }
 
 // --- Freeze/Unfreeze ---
