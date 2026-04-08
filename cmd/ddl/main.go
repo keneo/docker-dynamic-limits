@@ -115,6 +115,9 @@ Environment variables:
 	root.PersistentFlags().StringVar(&apiURL, "api", apiURL, "ddld API URL")
 	root.PersistentFlags().StringVar(&sockPath, "sock", sockPath, "ddld unix socket path (overrides --api)")
 	root.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
+	root.PersistentFlags().StringVar(&segmentScope, "segment", "", "Scope operations to a segment (overrides DDL_SEGMENT and persisted scope)")
+
+	cobra.OnInitialize(initScope)
 
 	root.AddCommand(registerCmd())
 	root.AddCommand(limitsCmd())
@@ -132,6 +135,7 @@ Environment variables:
 	root.AddCommand(logsCmd())
 	root.AddCommand(hooksCmd())
 	root.AddCommand(segmentsCmd())
+	root.AddCommand(scopeCmd())
 	root.AddCommand(freezeCmd())
 	root.AddCommand(unfreezeCmd())
 	root.AddCommand(freezeAllCmd())
