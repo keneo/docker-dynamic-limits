@@ -111,11 +111,16 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/providers", s.handleProviders)
 	// Runtime config management
 	s.mux.HandleFunc("/config", s.handleConfig)
-	// Global limits
+	// Global / host / scope limits
 	s.mux.HandleFunc("/global-limits", s.handleGlobalLimits)
+	s.mux.HandleFunc("/host-limits", s.handleGlobalLimits)
+	s.mux.HandleFunc("/scope-limits", s.handleScopeLimits)
 	// Freeze/unfreeze bulk operations
 	s.mux.HandleFunc("/freeze-all", s.handleFreezeAll)
 	s.mux.HandleFunc("/unfreeze-all", s.handleUnfreezeAll)
+	// Segment management
+	s.mux.HandleFunc("/segments", s.handleSegments)
+	s.mux.HandleFunc("/segments/", s.handleSegmentRoutes)
 }
 
 // Handler returns the HTTP handler (full API).
@@ -151,7 +156,7 @@ func (s *Server) handleContainersReadOnly(w http.ResponseWriter, r *http.Request
 func (s *Server) handleGlobalLimits(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		limits, err := s.store.GetAllGlobalLimits()
+		limits, err := s.store.GetAllScopeLimits(model.ScopeHost)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -170,7 +175,7 @@ func (s *Server) handleGlobalLimits(w http.ResponseWriter, r *http.Request) {
 		}
 
 		lt := model.LimitType(req.Type)
-		oldValue, _ := s.store.GetGlobalLimit(lt)
+		oldValue, _ := s.store.GetScopeLimit(model.ScopeHost,lt)
 		var newValue int64
 
 		op := req.Operation
@@ -197,7 +202,7 @@ func (s *Server) handleGlobalLimits(w http.ResponseWriter, r *http.Request) {
 		if s.keepLimitsConsistent && op != "increase" {
 			sumLimits := s.sumContainerLimits(lt, "")
 			// Factor in accumulated usage from removed containers
-			if accum, err := s.store.GetGlobalUsageAccum(); err == nil {
+			if accum, err := s.store.GetScopeUsageAccum(model.ScopeHost); err == nil {
 				sumLimits += accum[lt]
 			}
 			if sumLimits > 0 && newValue < sumLimits {
@@ -209,7 +214,7 @@ func (s *Server) handleGlobalLimits(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if err := s.store.SetGlobalLimit(lt, newValue); err != nil {
+		if err := s.store.SetScopeLimit(model.ScopeHost,lt, newValue); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -236,6 +241,17 @@ func (s *Server) handleGlobalLimits(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleScopeLimits delegates to handleGlobalLimits for now (scope query param
+// defaults to host). Future scopes can be dispatched here.
+func (s *Server) handleScopeLimits(w http.ResponseWriter, r *http.Request) {
+	scope := r.URL.Query().Get("scope")
+	if scope == "" || scope == "host" {
+		s.handleGlobalLimits(w, r)
+		return
+	}
+	writeError(w, http.StatusBadRequest, fmt.Errorf("unsupported scope: %s", scope))
+}
+
 // --- Container management ---
 
 func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
@@ -257,7 +273,7 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build global status
-	globalLimits, _ := s.store.GetAllGlobalLimits()
+	globalLimits, _ := s.store.GetAllScopeLimits(model.ScopeHost)
 	globalUsage := make(map[model.LimitType]int64)
 	for _, cs := range statuses {
 		for lt, v := range cs.Usage {
@@ -265,17 +281,23 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Add accumulated usage from removed containers
-	if accum, err := s.store.GetGlobalUsageAccum(); err == nil {
+	if accum, err := s.store.GetScopeUsageAccum(model.ScopeHost); err == nil {
 		for lt, v := range accum {
 			globalUsage[lt] += v
 		}
 	}
 
+	hostEnforced := s.enforcement.GetScopeEnforced(model.ScopeHost)
 	writeJSON(w, map[string]interface{}{
-		"containers":      statuses,
+		"containers": statuses,
+		// Backward-compatible global_* fields
 		"global_limits":   globalLimits,
 		"global_usage":    globalUsage,
-		"global_enforced": s.enforcement.GetGlobalEnforced(),
+		"global_enforced": hostEnforced,
+		// New host_* aliases
+		"host_limits":   globalLimits,
+		"host_usage":    globalUsage,
+		"host_enforced": hostEnforced,
 	})
 }
 
@@ -482,11 +504,11 @@ func (s *Server) handleLimits(w http.ResponseWriter, r *http.Request, containerI
 		requestedValue := newValue
 		var reason string
 		if s.keepLimitsConsistent && op != "decrease" {
-			globalLimit, _ := s.store.GetGlobalLimit(lt)
+			globalLimit, _ := s.store.GetScopeLimit(model.ScopeHost,lt)
 			if globalLimit > 0 {
 				sumOther := s.sumContainerLimits(lt, containerID)
 				// Factor in accumulated usage from removed containers
-				if accum, err := s.store.GetGlobalUsageAccum(); err == nil {
+				if accum, err := s.store.GetScopeUsageAccum(model.ScopeHost); err == nil {
 					sumOther += accum[lt]
 				}
 				maxAllowed := globalLimit - sumOther
@@ -1286,11 +1308,11 @@ func (s *Server) callErrorWebhooks(info proxy.UpstreamErrorInfo, containerName s
 // validateCurrentLimitsConsistent checks that for every limit type with a global limit,
 // the sum of per-container limits does not exceed the global limit.
 func (s *Server) validateCurrentLimitsConsistent() error {
-	globalLimits, err := s.store.GetAllGlobalLimits()
+	globalLimits, err := s.store.GetAllScopeLimits(model.ScopeHost)
 	if err != nil {
 		return fmt.Errorf("failed to read global limits: %w", err)
 	}
-	accum, _ := s.store.GetGlobalUsageAccum()
+	accum, _ := s.store.GetScopeUsageAccum(model.ScopeHost)
 	for lt, globalLimit := range globalLimits {
 		if globalLimit == 0 {
 			continue
@@ -1348,6 +1370,456 @@ func (s *Server) sumContainerLimits(lt model.LimitType, excludeID string) int64 
 		sum += lim
 	}
 	return sum
+}
+
+// getContainerState returns the Docker state string for a container.
+func (s *Server) getContainerState(dockerID string) string {
+	ctx := context.Background()
+	info, err := s.docker.InspectContainer(ctx, dockerID)
+	if err != nil {
+		return "deleted"
+	}
+	switch {
+	case info.State.Paused:
+		return "paused"
+	case info.State.Running:
+		return "running"
+	default:
+		return "exited"
+	}
+}
+
+// --- Segments ---
+
+func (s *Server) handleSegments(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		segments, err := s.store.ListSegments()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if segments == nil {
+			segments = []model.Segment{}
+		}
+		writeJSON(w, map[string]interface{}{"segments": segments})
+
+	case http.MethodPost:
+		var req struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid JSON: %w", err))
+			return
+		}
+		if req.ID == "" {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("id is required"))
+			return
+		}
+		if req.Name == "" {
+			req.Name = req.ID
+		}
+		seg, err := s.store.CreateSegment(req.ID, req.Name)
+		if err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		if s.bus != nil {
+			s.bus.PublishData(events.SegmentCreate, "", events.SegmentEventData{
+				SegmentID: seg.ID, Name: seg.Name,
+			})
+		}
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(w, seg)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleSegmentRoutes(w http.ResponseWriter, r *http.Request) {
+	// Parse /segments/{id}[/sub[/sub2]]
+	path := strings.TrimPrefix(r.URL.Path, "/segments/")
+	parts := strings.SplitN(path, "/", 3)
+	segID := parts[0]
+	if segID == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("segment id required"))
+		return
+	}
+
+	sub := ""
+	sub2 := ""
+	if len(parts) > 1 {
+		sub = parts[1]
+	}
+	if len(parts) > 2 {
+		sub2 = parts[2]
+	}
+
+	switch sub {
+	case "":
+		s.handleSegmentDetail(w, r, segID)
+	case "limits":
+		s.handleSegmentLimits(w, r, segID)
+	case "usage":
+		s.handleSegmentUsage(w, r, segID)
+	case "containers":
+		if sub2 == "" {
+			s.handleSegmentContainers(w, r, segID)
+		} else {
+			// /segments/{id}/containers/{cid}/assign or /unassign
+			cParts := strings.SplitN(sub2, "/", 2)
+			cid := cParts[0]
+			action := ""
+			if len(cParts) > 1 {
+				action = cParts[1]
+			}
+			switch action {
+			case "assign":
+				s.handleSegmentAssign(w, r, segID, cid)
+			case "unassign":
+				s.handleSegmentUnassign(w, r, segID, cid)
+			default:
+				http.NotFound(w, r)
+			}
+		}
+	case "freeze-all":
+		s.handleSegmentFreezeAll(w, r, segID)
+	case "unfreeze-all":
+		s.handleSegmentUnfreezeAll(w, r, segID)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) handleSegmentDetail(w http.ResponseWriter, r *http.Request, segID string) {
+	switch r.Method {
+	case http.MethodGet:
+		seg, err := s.store.GetSegment(segID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		scope := model.SegmentScope(segID)
+		limits, _ := s.store.GetAllScopeLimits(scope)
+		containers, _ := s.store.ListContainersByScope(scope)
+
+		// Aggregate usage
+		usage := make(map[model.LimitType]int64)
+		for _, c := range containers {
+			if u, err := s.store.GetAllUsage(c.ID); err == nil {
+				for lt, v := range u {
+					usage[lt] += v
+				}
+			}
+		}
+		if accum, err := s.store.GetScopeUsageAccum(scope); err == nil {
+			for lt, v := range accum {
+				usage[lt] += v
+			}
+		}
+
+		enforced := s.enforcement.GetScopeEnforced(scope)
+
+		writeJSON(w, map[string]interface{}{
+			"segment":    seg,
+			"limits":     limits,
+			"usage":      usage,
+			"enforced":   enforced,
+			"containers": len(containers),
+		})
+
+	case http.MethodDelete:
+		if err := s.store.DeleteSegment(segID); err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		if s.bus != nil {
+			s.bus.PublishData(events.SegmentDelete, "", events.SegmentEventData{
+				SegmentID: segID,
+			})
+		}
+		writeJSON(w, map[string]interface{}{"deleted": segID})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleSegmentLimits(w http.ResponseWriter, r *http.Request, segID string) {
+	scope := model.SegmentScope(segID)
+
+	switch r.Method {
+	case http.MethodGet:
+		limits, err := s.store.GetAllScopeLimits(scope)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, limits)
+
+	case http.MethodPut:
+		// Verify segment exists
+		if _, err := s.store.GetSegment(segID); err != nil {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+
+		var req struct {
+			Type      string `json:"type"`
+			Value     int64  `json:"value"`
+			Operation string `json:"operation"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid JSON: %w", err))
+			return
+		}
+
+		lt := model.LimitType(req.Type)
+		op := req.Operation
+		if op == "" {
+			op = "set"
+		}
+
+		oldValue, _ := s.store.GetScopeLimit(scope, lt)
+
+		var newValue int64
+		switch op {
+		case "set":
+			newValue = req.Value
+		case "increase":
+			newValue = oldValue + req.Value
+		case "decrease":
+			newValue = oldValue - req.Value
+			if newValue < 0 {
+				newValue = 0
+			}
+		default:
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid operation: %s", op))
+			return
+		}
+
+		if err := s.store.SetScopeLimit(scope, lt, newValue); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		if s.bus != nil {
+			s.bus.PublishData(events.LimitChange, "", events.LimitChangeData{
+				LimitType: req.Type,
+				OldValue:  oldValue,
+				NewValue:  newValue,
+				Operation: op,
+			})
+		}
+
+		writeJSON(w, map[string]interface{}{
+			"type":      req.Type,
+			"value":     newValue,
+			"old_value": oldValue,
+			"operation": op,
+			"applied":   "full",
+			"scope":     "segment:" + segID,
+		})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleSegmentUsage(w http.ResponseWriter, r *http.Request, segID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	scope := model.SegmentScope(segID)
+	containers, err := s.store.ListContainersByScope(scope)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	usage := make(map[model.LimitType]int64)
+	for _, c := range containers {
+		if u, err := s.store.GetAllUsage(c.ID); err == nil {
+			for lt, v := range u {
+				usage[lt] += v
+			}
+		}
+	}
+	if accum, err := s.store.GetScopeUsageAccum(scope); err == nil {
+		for lt, v := range accum {
+			usage[lt] += v
+		}
+	}
+
+	limits, _ := s.store.GetAllScopeLimits(scope)
+	enforced := s.enforcement.GetScopeEnforced(scope)
+
+	writeJSON(w, map[string]interface{}{
+		"usage":    usage,
+		"limits":   limits,
+		"enforced": enforced,
+	})
+}
+
+func (s *Server) handleSegmentContainers(w http.ResponseWriter, r *http.Request, segID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	scope := model.SegmentScope(segID)
+	containers, err := s.store.ListContainersByScope(scope)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	var statuses []map[string]interface{}
+	for _, c := range containers {
+		limits, _ := s.store.GetAllLimits(c.ID)
+		usage, _ := s.store.GetAllUsage(c.ID)
+		enforced := s.enforcement.GetEnforced(c.ID)
+		state := s.getContainerState(c.DockerID)
+
+		statuses = append(statuses, map[string]interface{}{
+			"container": c,
+			"limits":    limits,
+			"usage":     usage,
+			"enforced":  enforced,
+			"state":     state,
+			"frozen":    s.enforcement.IsFrozen(c.ID),
+		})
+	}
+
+	writeJSON(w, map[string]interface{}{"containers": statuses})
+}
+
+func (s *Server) handleSegmentAssign(w http.ResponseWriter, r *http.Request, segID, containerID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Verify segment exists
+	if _, err := s.store.GetSegment(segID); err != nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("segment %q not found", segID))
+		return
+	}
+
+	// Verify container exists
+	c, err := s.store.GetContainer(containerID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+
+	// Check if already in another segment
+	if c.SegmentID != "" && c.SegmentID != segID {
+		writeError(w, http.StatusConflict, fmt.Errorf("container %s already in segment %q; unassign first", containerID, c.SegmentID))
+		return
+	}
+
+	if err := s.store.SetContainerSegment(containerID, &segID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	// Update proxy scope tracking
+	if st, ok := s.proxy.(*proxy.SpendingTracker); ok {
+		st.SetContainerScope(containerID, model.SegmentScope(segID))
+	}
+
+	if s.bus != nil {
+		s.bus.PublishData(events.ContainerAssign, containerID, events.ContainerAssignData{
+			SegmentID: segID,
+		})
+	}
+
+	writeJSON(w, map[string]interface{}{"assigned": segID, "container": containerID})
+}
+
+func (s *Server) handleSegmentUnassign(w http.ResponseWriter, r *http.Request, segID, containerID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	c, err := s.store.GetContainer(containerID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+
+	if c.SegmentID != segID {
+		writeError(w, http.StatusConflict, fmt.Errorf("container %s is not in segment %q", containerID, segID))
+		return
+	}
+
+	if err := s.store.SetContainerSegment(containerID, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	// Update proxy scope tracking
+	if st, ok := s.proxy.(*proxy.SpendingTracker); ok {
+		st.SetContainerScope(containerID, model.ScopeHost)
+	}
+
+	if s.bus != nil {
+		s.bus.PublishData(events.ContainerUnassign, containerID, events.ContainerAssignData{
+			SegmentID: segID,
+		})
+	}
+
+	writeJSON(w, map[string]interface{}{"unassigned": segID, "container": containerID})
+}
+
+func (s *Server) handleSegmentFreezeAll(w http.ResponseWriter, r *http.Request, segID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	scope := model.SegmentScope(segID)
+	containers, err := s.store.ListContainersByScope(scope)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	var frozen []string
+	for _, c := range containers {
+		if err := s.enforcement.Freeze(c.ID); err == nil {
+			frozen = append(frozen, c.ID)
+		}
+	}
+	writeJSON(w, map[string]interface{}{"frozen": frozen, "count": len(frozen)})
+}
+
+func (s *Server) handleSegmentUnfreezeAll(w http.ResponseWriter, r *http.Request, segID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	scope := model.SegmentScope(segID)
+	containers, err := s.store.ListContainersByScope(scope)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	var unfrozen []string
+	for _, c := range containers {
+		if _, err := s.enforcement.Unfreeze(c.ID); err == nil {
+			unfrozen = append(unfrozen, c.ID)
+		}
+	}
+	writeJSON(w, map[string]interface{}{"unfrozen": unfrozen, "count": len(unfrozen)})
 }
 
 // --- Freeze/Unfreeze ---

@@ -23,9 +23,9 @@ type EnforcementController interface {
 	IsEnforced(containerID string, lt model.LimitType) bool
 	GetEnforced(containerID string) map[model.LimitType]bool
 	NotifyLimitChanged(containerID string)
-	StartGlobalEnforcement()
-	IsGlobalEnforced(lt model.LimitType) bool
-	GetGlobalEnforced() map[model.LimitType]bool
+	StartScopeEnforcement()
+	IsScopeEnforced(scope model.Scope, lt model.LimitType) bool
+	GetScopeEnforced(scope model.Scope) map[model.LimitType]bool
 	Freeze(containerID string) error
 	Unfreeze(containerID string) (enforcementActive bool, err error)
 	IsFrozen(containerID string) bool
@@ -45,8 +45,8 @@ type Manager struct {
 	enforced       map[string]map[model.LimitType]bool
 	frozen         map[string]bool // containerID -> frozen state
 	dockerIDs      map[string]string // containerID -> dockerID (for freeze/unfreeze)
-	globalEnforced map[model.LimitType]bool
-	globalCancel   context.CancelFunc
+	scopeEnforced map[model.Scope]map[model.LimitType]bool
+	scopeCancel   context.CancelFunc
 	lastSleepEmit  time.Time // dedup sleep events across containers
 }
 
@@ -63,7 +63,7 @@ func NewManager(st store.DataStore, dc docker.DockerClient, cg cgroup.CgroupRead
 		enforced:       make(map[string]map[model.LimitType]bool),
 		frozen:         make(map[string]bool),
 		dockerIDs:      make(map[string]string),
-		globalEnforced: make(map[model.LimitType]bool),
+		scopeEnforced: make(map[model.Scope]map[model.LimitType]bool),
 	}
 }
 
@@ -554,7 +554,7 @@ func (m *Manager) isActuallyEnforced(ctx context.Context, dockerID string, lt mo
 }
 
 // isOtherPauseActive checks if another limit type that uses pause is also enforced,
-// including global enforcement and user freeze.
+// including scope enforcement (host + container's segment) and user freeze.
 func (m *Manager) isOtherPauseActive(containerID string, except model.LimitType) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -568,49 +568,68 @@ func (m *Manager) isOtherPauseActive(containerID string, except model.LimitType)
 			return true
 		}
 	}
-	// Also check global enforcement
-	for _, lt := range pauseTypes {
-		if lt != except && m.globalEnforced[lt] {
-			return true
+	// Check host scope enforcement
+	if hostEnf := m.scopeEnforced[model.ScopeHost]; hostEnf != nil {
+		for _, lt := range pauseTypes {
+			if lt != except && hostEnf[lt] {
+				return true
+			}
+		}
+	}
+	// Check container's segment scope enforcement
+	if c, err := m.store.GetContainer(containerID); err == nil && c.SegmentID != "" {
+		segScope := model.SegmentScope(c.SegmentID)
+		if segEnf := m.scopeEnforced[segScope]; segEnf != nil {
+			for _, lt := range pauseTypes {
+				if lt != except && segEnf[lt] {
+					return true
+				}
+			}
 		}
 	}
 	return false
 }
 
-// StartGlobalEnforcement spawns a goroutine that enforces global limits.
-func (m *Manager) StartGlobalEnforcement() {
+// StartScopeEnforcement spawns a goroutine that enforces scope-level limits
+// (host scope and all segment scopes).
+func (m *Manager) StartScopeEnforcement() {
 	m.mu.Lock()
-	if m.globalCancel != nil {
+	if m.scopeCancel != nil {
 		m.mu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	m.globalCancel = cancel
+	m.scopeCancel = cancel
 	m.mu.Unlock()
 
-	go m.globalEnforcementLoop(ctx)
-	log.Println("[enforcement] started global enforcement")
+	go m.scopeEnforcementLoop(ctx)
+	log.Println("[enforcement] started scope enforcement")
 }
 
-// IsGlobalEnforced returns whether a specific limit type is globally enforced.
-func (m *Manager) IsGlobalEnforced(lt model.LimitType) bool {
+// IsScopeEnforced returns whether a specific limit type is enforced for a scope.
+func (m *Manager) IsScopeEnforced(scope model.Scope, lt model.LimitType) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.globalEnforced[lt]
+	if e := m.scopeEnforced[scope]; e != nil {
+		return e[lt]
+	}
+	return false
 }
 
-// GetGlobalEnforced returns all global enforcement states.
-func (m *Manager) GetGlobalEnforced() map[model.LimitType]bool {
+// GetScopeEnforced returns all enforcement states for a scope.
+func (m *Manager) GetScopeEnforced(scope model.Scope) map[model.LimitType]bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	result := make(map[model.LimitType]bool)
-	for k, v := range m.globalEnforced {
-		result[k] = v
+	if e := m.scopeEnforced[scope]; e != nil {
+		for k, v := range e {
+			result[k] = v
+		}
 	}
 	return result
 }
 
-func (m *Manager) globalEnforcementLoop(ctx context.Context) {
+func (m *Manager) scopeEnforcementLoop(ctx context.Context) {
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
 
@@ -619,24 +638,32 @@ func (m *Manager) globalEnforcementLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.checkGlobalEnforcement(ctx)
+			// Check host scope
+			m.checkScopeEnforcement(ctx, model.ScopeHost)
+			// Check each segment scope
+			segments, err := m.store.ListSegments()
+			if err == nil {
+				for _, seg := range segments {
+					m.checkScopeEnforcement(ctx, model.SegmentScope(seg.ID))
+				}
+			}
 		}
 	}
 }
 
-func (m *Manager) checkGlobalEnforcement(ctx context.Context) {
-	globalLimits, err := m.store.GetAllGlobalLimits()
+func (m *Manager) checkScopeEnforcement(ctx context.Context, scope model.Scope) {
+	scopeLimits, err := m.store.GetAllScopeLimits(scope)
 	if err != nil {
-		log.Printf("[enforcement] error getting global limits: %v", err)
+		log.Printf("[enforcement] error getting scope %q limits: %v", scope, err)
 		return
 	}
-	if len(globalLimits) == 0 {
+	if len(scopeLimits) == 0 {
 		return
 	}
 
-	containers, err := m.store.ListContainers()
+	containers, err := m.store.ListContainersByScope(scope)
 	if err != nil {
-		log.Printf("[enforcement] error listing containers for global enforcement: %v", err)
+		log.Printf("[enforcement] error listing containers for scope %q enforcement: %v", scope, err)
 		return
 	}
 
@@ -652,13 +679,13 @@ func (m *Manager) checkGlobalEnforcement(ctx context.Context) {
 		}
 	}
 	// Add accumulated usage from removed containers
-	if accum, err := m.store.GetGlobalUsageAccum(); err == nil {
+	if accum, err := m.store.GetScopeUsageAccum(scope); err == nil {
 		for lt, v := range accum {
 			totalUsage[lt] += v
 		}
 	}
 
-	for lt, limit := range globalLimits {
+	for lt, limit := range scopeLimits {
 		if limit == 0 {
 			continue
 		}
@@ -667,19 +694,22 @@ func (m *Manager) checkGlobalEnforcement(ctx context.Context) {
 		exceeded := usage >= limit
 
 		m.mu.Lock()
-		wasEnforced := m.globalEnforced[lt]
+		if m.scopeEnforced[scope] == nil {
+			m.scopeEnforced[scope] = make(map[model.LimitType]bool)
+		}
+		wasEnforced := m.scopeEnforced[scope][lt]
 		m.mu.Unlock()
 
 		if exceeded && !wasEnforced {
-			m.globalEnforce(ctx, lt, containers)
+			m.scopeEnforce(ctx, scope, lt, containers)
 		} else if !exceeded && wasEnforced {
-			m.globalRelease(ctx, lt, containers)
+			m.scopeRelease(ctx, scope, lt, containers)
 		}
 	}
 }
 
-func (m *Manager) globalEnforce(ctx context.Context, lt model.LimitType, containers []model.Container) {
-	log.Printf("[enforcement] global limit %s exceeded, enforcing on all containers", lt)
+func (m *Manager) scopeEnforce(ctx context.Context, scope model.Scope, lt model.LimitType, containers []model.Container) {
+	log.Printf("[enforcement] scope %q limit %s exceeded, enforcing on all containers", scope, lt)
 
 	for _, c := range containers {
 		running, err := m.docker.IsContainerRunning(ctx, c.DockerID)
@@ -690,13 +720,16 @@ func (m *Manager) globalEnforce(ctx context.Context, lt model.LimitType, contain
 		m.enforce(ctx, c.ID, c.DockerID, lt, cgroupPath)
 	}
 
-	// Block all proxy API calls when global spending limit is exceeded
+	// Block proxy API calls when spending limit is exceeded for this scope
 	if lt == model.LimitSpending && m.proxy != nil {
-		m.proxy.SetGlobalSpendingBlocked(true)
+		m.proxy.SetScopeSpendingBlocked(scope, true)
 	}
 
 	m.mu.Lock()
-	m.globalEnforced[lt] = true
+	if m.scopeEnforced[scope] == nil {
+		m.scopeEnforced[scope] = make(map[model.LimitType]bool)
+	}
+	m.scopeEnforced[scope][lt] = true
 	m.mu.Unlock()
 
 	if m.bus != nil {
@@ -707,17 +740,19 @@ func (m *Manager) globalEnforce(ctx context.Context, lt model.LimitType, contain
 	}
 }
 
-func (m *Manager) globalRelease(ctx context.Context, lt model.LimitType, containers []model.Container) {
-	log.Printf("[enforcement] global limit %s released, releasing all containers", lt)
+func (m *Manager) scopeRelease(ctx context.Context, scope model.Scope, lt model.LimitType, containers []model.Container) {
+	log.Printf("[enforcement] scope %q limit %s released, releasing all containers", scope, lt)
 
-	// Unblock proxy API calls when global spending limit is released
+	// Unblock proxy API calls when spending limit is released for this scope
 	if lt == model.LimitSpending && m.proxy != nil {
-		m.proxy.SetGlobalSpendingBlocked(false)
+		m.proxy.SetScopeSpendingBlocked(scope, false)
 	}
 
-	// Clear global enforced first so isOtherPauseActive sees updated state
+	// Clear scope enforced first so isOtherPauseActive sees updated state
 	m.mu.Lock()
-	m.globalEnforced[lt] = false
+	if m.scopeEnforced[scope] != nil {
+		m.scopeEnforced[scope][lt] = false
+	}
 	m.mu.Unlock()
 
 	for _, c := range containers {
@@ -749,7 +784,7 @@ func (m *Manager) StartAll() error {
 	return nil
 }
 
-// StopAll stops enforcement for all containers and global enforcement.
+// StopAll stops enforcement for all containers and scope enforcement.
 func (m *Manager) StopAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -757,9 +792,9 @@ func (m *Manager) StopAll() {
 		cancel()
 		delete(m.workers, id)
 	}
-	if m.globalCancel != nil {
-		m.globalCancel()
-		m.globalCancel = nil
+	if m.scopeCancel != nil {
+		m.scopeCancel()
+		m.scopeCancel = nil
 	}
 }
 
@@ -833,12 +868,27 @@ func (m *Manager) Unfreeze(containerID string) (enforcementActive bool, err erro
 			break
 		}
 	}
-	// Also check global enforcement pause
+	// Also check scope enforcement pause (host + container's segment)
 	if !anyEnforced {
-		for _, lt := range pauseTypes {
-			if m.globalEnforced[lt] {
-				anyEnforced = true
-				break
+		if hostEnf := m.scopeEnforced[model.ScopeHost]; hostEnf != nil {
+			for _, lt := range pauseTypes {
+				if hostEnf[lt] {
+					anyEnforced = true
+					break
+				}
+			}
+		}
+	}
+	if !anyEnforced {
+		if c, err := m.store.GetContainer(containerID); err == nil && c.SegmentID != "" {
+			segScope := model.SegmentScope(c.SegmentID)
+			if segEnf := m.scopeEnforced[segScope]; segEnf != nil {
+				for _, lt := range pauseTypes {
+					if segEnf[lt] {
+						anyEnforced = true
+						break
+					}
+				}
 			}
 		}
 	}

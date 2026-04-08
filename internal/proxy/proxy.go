@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	model "github.com/keneo/docker-dynamic-limits/internal/model"
 )
 
 // SpendingProxy defines the interface for spending tracking operations.
@@ -24,7 +26,7 @@ type SpendingProxy interface {
 	AddSpending(containerID string, milliCents int64)
 	GetActivity(containerID string) []ProxyActivity
 	RecordActivity(containerID string, a ProxyActivity)
-	SetGlobalSpendingBlocked(blocked bool)
+	SetScopeSpendingBlocked(scope model.Scope, blocked bool)
 }
 
 // OllamaHandler is the interface the proxy uses to dispatch Ollama requests.
@@ -62,8 +64,10 @@ type SpendingTracker struct {
 	onUpstreamError func(info UpstreamErrorInfo)
 	// errorDedup tracks last webhook fire time per error key to avoid flooding
 	errorDedup map[string]time.Time
-	// globalSpendingBlocked is set by enforcement when global spending limit is exceeded
-	globalSpendingBlocked bool
+	// scopeSpendingBlocked tracks which scopes (host, segments) have spending blocked
+	scopeSpendingBlocked map[model.Scope]bool
+	// containerScopes tracks which scope each container belongs to
+	containerScopes map[string]model.Scope
 }
 
 // UpstreamErrorInfo describes an error returned by an upstream API provider.
@@ -107,16 +111,18 @@ const (
 // NewSpendingTracker creates a new spending tracker.
 func NewSpendingTracker(onUpdate func(containerID string, totalCents int64)) *SpendingTracker {
 	return &SpendingTracker{
-		containerByAddr:  make(map[string]string),
-		proxyAddrs:       make(map[string]string),
-		spending:         make(map[string]int64),
-		budgets:          make(map[string]int64),
-		prices:           defaultPrices(),
-		apiKeys:          make(map[string]string),
-		onSpendingUpdate: onUpdate,
-		enabledHosts:     make(map[string]bool),
-		activity:         make(map[string][]ProxyActivity),
-		errorDedup:       make(map[string]time.Time),
+		containerByAddr:      make(map[string]string),
+		proxyAddrs:           make(map[string]string),
+		spending:             make(map[string]int64),
+		budgets:              make(map[string]int64),
+		prices:               defaultPrices(),
+		apiKeys:              make(map[string]string),
+		onSpendingUpdate:     onUpdate,
+		enabledHosts:         make(map[string]bool),
+		activity:             make(map[string][]ProxyActivity),
+		errorDedup:           make(map[string]time.Time),
+		scopeSpendingBlocked: make(map[model.Scope]bool),
+		containerScopes:      make(map[string]model.Scope),
 	}
 }
 
@@ -279,18 +285,35 @@ func (st *SpendingTracker) GetEnabledHosts() map[string]bool {
 	return result
 }
 
-// SetGlobalSpendingBlocked sets the global spending blocked flag.
-// When true, all tracked API calls are rejected with 429.
-func (st *SpendingTracker) SetGlobalSpendingBlocked(blocked bool) {
+// SetScopeSpendingBlocked sets the spending blocked flag for a given scope.
+// When true, tracked API calls for containers in that scope are rejected with 429.
+func (st *SpendingTracker) SetScopeSpendingBlocked(scope model.Scope, blocked bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.globalSpendingBlocked = blocked
+	st.scopeSpendingBlocked[scope] = blocked
 }
 
-func (st *SpendingTracker) isGlobalSpendingBlocked() bool {
+// isScopeSpendingBlocked returns true if spending is blocked for the container's scope(s).
+// Checks both host scope and the container's segment scope (if any).
+func (st *SpendingTracker) isScopeSpendingBlocked(containerID string) bool {
 	st.mu.RLock()
 	defer st.mu.RUnlock()
-	return st.globalSpendingBlocked
+	if st.scopeSpendingBlocked[model.ScopeHost] {
+		return true
+	}
+	if scope, ok := st.containerScopes[containerID]; ok && scope != model.ScopeHost {
+		if st.scopeSpendingBlocked[scope] {
+			return true
+		}
+	}
+	return false
+}
+
+// SetContainerScope records which scope a container belongs to.
+func (st *SpendingTracker) SetContainerScope(containerID string, scope model.Scope) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.containerScopes[containerID] = scope
 }
 
 // RecordActivity appends a proxy activity entry for a container.
@@ -398,16 +421,16 @@ func (st *SpendingTracker) proxyHandler(containerID string) http.Handler {
 			return
 		}
 
-		if isAPICall && st.isGlobalSpendingBlocked() {
+		if isAPICall && st.isScopeSpendingBlocked(containerID) {
 			st.RecordActivity(containerID, ProxyActivity{
 				Timestamp:  time.Now(),
 				Host:       stripPort(r.Host),
 				Path:       r.URL.Path,
 				Method:     r.Method,
 				StatusCode: http.StatusTooManyRequests,
-				Error:      "global spending limit exceeded",
+				Error:      "spending limit exceeded",
 			})
-			http.Error(w, `{"error":"global spending limit exceeded"}`, http.StatusTooManyRequests)
+			http.Error(w, `{"error":"spending limit exceeded"}`, http.StatusTooManyRequests)
 			return
 		}
 
@@ -661,8 +684,8 @@ func (st *SpendingTracker) handleConnect(containerID string, w http.ResponseWrit
 		return
 	}
 
-	if st.isTrackedAPI(r.Host) && st.isGlobalSpendingBlocked() {
-		http.Error(w, "global spending limit exceeded", http.StatusTooManyRequests)
+	if st.isTrackedAPI(r.Host) && st.isScopeSpendingBlocked(containerID) {
+		http.Error(w, "spending limit exceeded", http.StatusTooManyRequests)
 		return
 	}
 

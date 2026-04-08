@@ -20,7 +20,8 @@ const (
 	OllamaCancel       EventType = "ollama_cancel"
 	OllamaBidChange    EventType = "ollama_bid_change"
 	SystemSleep              EventType = "system_sleep"
-	GlobalEnforcementChange  EventType = "global_enforcement_change"
+	GlobalEnforcementChange  EventType = "global_enforcement_change" // kept for backward compat
+	ScopeEnforcementChange   EventType = "scope_enforcement_change"
 	ContainerFrozen          EventType = "container_frozen"
 	ContainerUnfrozen        EventType = "container_unfrozen"
 	ProxyUpstreamError       EventType = "proxy_upstream_error"
@@ -93,10 +94,36 @@ type SystemSleepData struct {
 	DurationSeconds float64 `json:"duration_seconds"`
 }
 
-// GlobalEnforcementChangeData is the payload for global_enforcement_change events.
+// GlobalEnforcementChangeData is the payload for global_enforcement_change events (kept for backward compat).
 type GlobalEnforcementChangeData struct {
 	LimitType string `json:"limit_type"`
 	Enforced  bool   `json:"enforced"`
+}
+
+// ScopeEnforcementChangeData is the payload for scope_enforcement_change events.
+type ScopeEnforcementChangeData struct {
+	Scope     string `json:"scope"`
+	LimitType string `json:"limit_type"`
+	Enforced  bool   `json:"enforced"`
+}
+
+// Segment event types
+const (
+	SegmentCreate     EventType = "segment_create"
+	SegmentDelete     EventType = "segment_delete"
+	ContainerAssign   EventType = "container_assign"
+	ContainerUnassign EventType = "container_unassign"
+)
+
+// SegmentEventData is the payload for segment_create/segment_delete events.
+type SegmentEventData struct {
+	SegmentID string `json:"segment_id"`
+	Name      string `json:"name,omitempty"`
+}
+
+// ContainerAssignData is the payload for container_assign/container_unassign events.
+type ContainerAssignData struct {
+	SegmentID string `json:"segment_id"`
 }
 
 // ProxyUpstreamErrorData is the payload for proxy_upstream_error events.

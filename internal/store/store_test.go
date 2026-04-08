@@ -295,53 +295,53 @@ func TestRegisterContainerReplace(t *testing.T) {
 	}
 }
 
-func TestSetAndGetGlobalLimit(t *testing.T) {
+func TestSetAndGetScopeLimit(t *testing.T) {
 	s := newTestStore(t)
 
-	err := s.SetGlobalLimit(model.LimitCPU, 86400)
+	err := s.SetScopeLimit(model.ScopeHost, model.LimitCPU, 86400)
 	if err != nil {
-		t.Fatalf("SetGlobalLimit: %v", err)
+		t.Fatalf("SetScopeLimit: %v", err)
 	}
 
-	got, err := s.GetGlobalLimit(model.LimitCPU)
+	got, err := s.GetScopeLimit(model.ScopeHost, model.LimitCPU)
 	if err != nil {
-		t.Fatalf("GetGlobalLimit: %v", err)
+		t.Fatalf("GetScopeLimit: %v", err)
 	}
 	if got != 86400 {
 		t.Errorf("got %d, want 86400", got)
 	}
 }
 
-func TestGetGlobalLimitDefault(t *testing.T) {
+func TestGetScopeLimitDefault(t *testing.T) {
 	s := newTestStore(t)
-	got, err := s.GetGlobalLimit(model.LimitCPU)
+	got, err := s.GetScopeLimit(model.ScopeHost, model.LimitCPU)
 	if err != nil {
-		t.Fatalf("GetGlobalLimit: %v", err)
+		t.Fatalf("GetScopeLimit: %v", err)
 	}
 	if got != 0 {
 		t.Errorf("default global limit = %d, want 0", got)
 	}
 }
 
-func TestSetGlobalLimitOverwrite(t *testing.T) {
+func TestSetScopeLimitOverwrite(t *testing.T) {
 	s := newTestStore(t)
-	s.SetGlobalLimit(model.LimitCPU, 100)
-	s.SetGlobalLimit(model.LimitCPU, 200)
+	s.SetScopeLimit(model.ScopeHost, model.LimitCPU, 100)
+	s.SetScopeLimit(model.ScopeHost, model.LimitCPU, 200)
 
-	got, _ := s.GetGlobalLimit(model.LimitCPU)
+	got, _ := s.GetScopeLimit(model.ScopeHost, model.LimitCPU)
 	if got != 200 {
 		t.Errorf("got %d, want 200", got)
 	}
 }
 
-func TestGetAllGlobalLimits(t *testing.T) {
+func TestGetAllScopeLimits(t *testing.T) {
 	s := newTestStore(t)
-	s.SetGlobalLimit(model.LimitCPU, 100)
-	s.SetGlobalLimit(model.LimitSpending, 500)
+	s.SetScopeLimit(model.ScopeHost, model.LimitCPU, 100)
+	s.SetScopeLimit(model.ScopeHost, model.LimitSpending, 500)
 
-	all, err := s.GetAllGlobalLimits()
+	all, err := s.GetAllScopeLimits(model.ScopeHost)
 	if err != nil {
-		t.Fatalf("GetAllGlobalLimits: %v", err)
+		t.Fatalf("GetAllScopeLimits: %v", err)
 	}
 	if len(all) != 2 {
 		t.Fatalf("len = %d, want 2", len(all))
@@ -354,11 +354,11 @@ func TestGetAllGlobalLimits(t *testing.T) {
 	}
 }
 
-func TestGetAllGlobalLimitsEmpty(t *testing.T) {
+func TestGetAllScopeLimitsEmpty(t *testing.T) {
 	s := newTestStore(t)
-	all, err := s.GetAllGlobalLimits()
+	all, err := s.GetAllScopeLimits(model.ScopeHost)
 	if err != nil {
-		t.Fatalf("GetAllGlobalLimits: %v", err)
+		t.Fatalf("GetAllScopeLimits: %v", err)
 	}
 	if len(all) != 0 {
 		t.Fatalf("len = %d, want 0", len(all))

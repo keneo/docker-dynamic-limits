@@ -1,6 +1,28 @@
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
+
+// Scope identifies an enforcement scope: host ("") or a named segment.
+type Scope string
+
+const ScopeHost Scope = "" // Host scope = all containers on this machine
+
+// SegmentScope returns the scope for a named segment.
+func SegmentScope(id string) Scope { return Scope("segment:" + id) }
+
+// IsSegment returns true if this scope refers to a segment.
+func (s Scope) IsSegment() bool { return strings.HasPrefix(string(s), "segment:") }
+
+// SegmentID extracts the segment ID from a segment scope. Returns "" for host scope.
+func (s Scope) SegmentID() string {
+	if s.IsSegment() {
+		return strings.TrimPrefix(string(s), "segment:")
+	}
+	return ""
+}
 
 // LimitType identifies a resource limit category.
 type LimitType string
@@ -39,10 +61,18 @@ var CumulativeLimitTypes = []LimitType{
 
 // Container represents a managed container.
 type Container struct {
-	ID          string    `json:"id"`
-	DockerID    string    `json:"docker_id"`
-	Name        string    `json:"name"`
+	ID           string    `json:"id"`
+	DockerID     string    `json:"docker_id"`
+	Name         string    `json:"name"`
 	RegisteredAt time.Time `json:"registered_at"`
+	SegmentID    string    `json:"segment_id,omitempty"` // empty = no segment (host-only)
+}
+
+// Segment represents a named group of containers with shared limits.
+type Segment struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // LimitConfig holds the configured limit for one resource on one container.

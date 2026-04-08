@@ -120,6 +120,7 @@ Environment variables:
 	root.AddCommand(limitsCmd())
 	root.AddCommand(usageCmd())
 	root.AddCommand(usageAllCmd())
+	root.AddCommand(usageHostCmd())
 	root.AddCommand(usageGlobalCmd())
 	root.AddCommand(cloneCmd())
 	root.AddCommand(lsCmd())
@@ -130,6 +131,7 @@ Environment variables:
 	root.AddCommand(daemonCmd())
 	root.AddCommand(logsCmd())
 	root.AddCommand(hooksCmd())
+	root.AddCommand(segmentsCmd())
 	root.AddCommand(freezeCmd())
 	root.AddCommand(unfreezeCmd())
 	root.AddCommand(freezeAllCmd())
@@ -284,56 +286,89 @@ Examples:
 		},
 	})
 
-	// Global limit commands
-	limits.AddCommand(&cobra.Command{
-		Use:   "set-global <type> <value>",
-		Short: "Set a global limit to an absolute value",
-		Long: `Set a global resource limit that applies to the sum of all containers.
+	// Host/global limit commands (global kept as aliases for backward compat)
+	setHostCmd := &cobra.Command{
+		Use:   "set-host <type> <value>",
+		Short: "Set a host limit to an absolute value",
+		Long: `Set a host-level resource limit that applies to the sum of all containers.
 
 Uses the same value formats as "limits set".
 
 Examples:
-  ddl limits set-global cpu 24h
-  ddl limits set-global spending 100.00`,
+  ddl limits set-host cpu 24h
+  ddl limits set-host spending 100.00`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return setGlobalLimit(args[0], args[1], "set")
 		},
-	})
+	}
+	setGlobalAlias := &cobra.Command{
+		Use:    "set-global <type> <value>",
+		Short:  "Alias for set-host",
+		Hidden: true,
+		Args:   cobra.ExactArgs(2),
+		RunE:   setHostCmd.RunE,
+	}
 
-	limits.AddCommand(&cobra.Command{
-		Use:   "increase-global <type> <value>",
-		Short: "Increase a global limit by the given amount",
+	increaseHostCmd := &cobra.Command{
+		Use:   "increase-host <type> <value>",
+		Short: "Increase a host limit by the given amount",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return setGlobalLimit(args[0], args[1], "increase")
 		},
-	})
+	}
+	increaseGlobalAlias := &cobra.Command{
+		Use:    "increase-global <type> <value>",
+		Short:  "Alias for increase-host",
+		Hidden: true,
+		Args:   cobra.ExactArgs(2),
+		RunE:   increaseHostCmd.RunE,
+	}
 
-	limits.AddCommand(&cobra.Command{
-		Use:   "decrease-global <type> <value>",
-		Short: "Decrease a global limit by the given amount",
+	decreaseHostCmd := &cobra.Command{
+		Use:   "decrease-host <type> <value>",
+		Short: "Decrease a host limit by the given amount",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return setGlobalLimit(args[0], args[1], "decrease")
 		},
-	})
+	}
+	decreaseGlobalAlias := &cobra.Command{
+		Use:    "decrease-global <type> <value>",
+		Short:  "Alias for decrease-host",
+		Hidden: true,
+		Args:   cobra.ExactArgs(2),
+		RunE:   decreaseHostCmd.RunE,
+	}
 
-	limits.AddCommand(&cobra.Command{
-		Use:   "get-global",
-		Short: "Show all global limits",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := apiGet("/global-limits")
-			if err != nil {
-				return err
-			}
-			if jsonOutput {
-				return printJSON(resp)
-			}
-			printLimitsOrUsage(resp, "Global Limit")
-			return nil
-		},
-	})
+	getHostLimitsRunE := func(cmd *cobra.Command, args []string) error {
+		resp, err := apiGet("/host-limits")
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return printJSON(resp)
+		}
+		printLimitsOrUsage(resp, "Host Limit")
+		return nil
+	}
+	getHostCmd := &cobra.Command{
+		Use:   "get-host",
+		Short: "Show all host limits",
+		RunE:  getHostLimitsRunE,
+	}
+	getGlobalAlias := &cobra.Command{
+		Use:    "get-global",
+		Short:  "Alias for get-host",
+		Hidden: true,
+		RunE:   getHostLimitsRunE,
+	}
+
+	limits.AddCommand(setHostCmd, setGlobalAlias)
+	limits.AddCommand(increaseHostCmd, increaseGlobalAlias)
+	limits.AddCommand(decreaseHostCmd, decreaseGlobalAlias)
+	limits.AddCommand(getHostCmd, getGlobalAlias)
 
 	return limits
 }
@@ -812,50 +847,64 @@ func setGlobalLimit(limitType, valueStr, operation string) error {
 	case "decrease":
 		verb = "decreased"
 	}
-	fmt.Printf("global %s limit %s to %s\n", limitType, verb, formatValue(limitType, newVal))
+	fmt.Printf("host %s limit %s to %s\n", limitType, verb, formatValue(limitType, newVal))
 	return nil
+}
+
+func usageHostCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "usage-host",
+		Short: "Show aggregated usage across all containers vs host limits",
+		RunE:  usageHostRunE,
+	}
 }
 
 func usageGlobalCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "usage-global",
-		Short: "Show aggregated usage across all containers vs global limits",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := fetchContainersResponse()
-			if err != nil {
-				return err
-			}
-
-			if jsonOutput {
-				return printJSON(map[string]interface{}{
-					"global_limits":   result.GlobalLimits,
-					"global_usage":    result.GlobalUsage,
-					"global_enforced": result.GlobalEnforced,
-				})
-			}
-
-			types := []string{"cpu", "ram", "net", "disk", "disk-io-bytes", "disk-io-ops", "spending",
-				"ram-usage-bsec", "disk-usage-bsec", "ram-request-bsec", "disk-request-bsec"}
-
-			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintf(w, "TYPE\tUSAGE\tGLOBAL LIMIT\tSTATUS\n")
-			for _, t := range types {
-				u := getJSONFloat(result.GlobalUsage, t)
-				l := getJSONFloat(result.GlobalLimits, t)
-				status := "-"
-				if l > 0 {
-					pct := u / l * 100
-					status = fmt.Sprintf("%.1f%%", pct)
-					if u >= l {
-						status += " ENFORCED"
-					}
-				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t, formatValue(t, int64(u)), formatValue(t, int64(l)), status)
-			}
-			w.Flush()
-			return nil
-		},
+		Use:    "usage-global",
+		Short:  "Alias for usage-host",
+		Hidden: true,
+		RunE:   usageHostRunE,
 	}
+}
+
+func usageHostRunE(cmd *cobra.Command, args []string) error {
+	result, err := fetchContainersResponse()
+	if err != nil {
+		return err
+	}
+
+	if jsonOutput {
+		return printJSON(map[string]interface{}{
+			"host_limits":     result.HostLimits,
+			"host_usage":      result.HostUsage,
+			"host_enforced":   result.HostEnforced,
+			"global_limits":   result.GlobalLimits,
+			"global_usage":    result.GlobalUsage,
+			"global_enforced": result.GlobalEnforced,
+		})
+	}
+
+	types := []string{"cpu", "ram", "net", "disk", "disk-io-bytes", "disk-io-ops", "spending",
+		"ram-usage-bsec", "disk-usage-bsec", "ram-request-bsec", "disk-request-bsec"}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "TYPE\tUSAGE\tHOST LIMIT\tSTATUS\n")
+	for _, t := range types {
+		u := getJSONFloat(result.HostUsage, t)
+		l := getJSONFloat(result.HostLimits, t)
+		status := "-"
+		if l > 0 {
+			pct := u / l * 100
+			status = fmt.Sprintf("%.1f%%", pct)
+			if u >= l {
+				status += " ENFORCED"
+			}
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t, formatValue(t, int64(u)), formatValue(t, int64(l)), status)
+	}
+	w.Flush()
+	return nil
 }
 
 func apiGet(path string) (map[string]interface{}, error) {
@@ -902,9 +951,12 @@ func apiPostPath(path string, body interface{}) (map[string]interface{}, error) 
 // containersResponse represents the response from GET /containers.
 type containersResponse struct {
 	Containers     []map[string]interface{} `json:"containers"`
-	GlobalLimits   map[string]interface{}   `json:"global_limits"`
-	GlobalUsage    map[string]interface{}   `json:"global_usage"`
-	GlobalEnforced map[string]interface{}   `json:"global_enforced"`
+	HostLimits     map[string]interface{}   `json:"host_limits"`
+	HostUsage      map[string]interface{}   `json:"host_usage"`
+	HostEnforced   map[string]interface{}   `json:"host_enforced"`
+	GlobalLimits   map[string]interface{}   `json:"global_limits"`   // backward compat
+	GlobalUsage    map[string]interface{}   `json:"global_usage"`    // backward compat
+	GlobalEnforced map[string]interface{}   `json:"global_enforced"` // backward compat
 }
 
 func fetchContainersResponse() (*containersResponse, error) {

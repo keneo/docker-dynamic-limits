@@ -377,9 +377,9 @@ func TestGlobalEnforcementPausesAllContainers(t *testing.T) {
 	ms.SetUsage(containerID2, model.LimitCPU, 50)
 
 	// Set global CPU limit at 100s (total usage 110s exceeds it)
-	ms.SetGlobalLimit(model.LimitCPU, 100)
+	ms.SetScopeLimit(model.ScopeHost, model.LimitCPU, 100)
 
-	m.checkGlobalEnforcement(nil)
+	m.checkScopeEnforcement(nil, model.ScopeHost)
 
 	// Both containers should be paused
 	paused1, _ := md.IsContainerPaused(nil, dockerID1)
@@ -391,7 +391,7 @@ func TestGlobalEnforcementPausesAllContainers(t *testing.T) {
 		t.Error("container c2 should be paused when global CPU limit exceeded")
 	}
 
-	if !m.IsGlobalEnforced(model.LimitCPU) {
+	if !m.IsScopeEnforced(model.ScopeHost, model.LimitCPU) {
 		t.Error("global CPU should be marked as enforced")
 	}
 }
@@ -413,7 +413,7 @@ func TestGlobalEnforcementNoLimitNoAction(t *testing.T) {
 	m.checkAndEnforce(nil, containerID, dockerID, false)
 
 	// No global limits set
-	m.checkGlobalEnforcement(nil)
+	m.checkScopeEnforcement(nil, model.ScopeHost)
 
 	paused, _ := md.IsContainerPaused(nil, dockerID)
 	if paused {
@@ -437,8 +437,8 @@ func TestGlobalEnforcementReleasesWhenLimitIncreased(t *testing.T) {
 	ms.SetUsage(containerID, model.LimitCPU, 200)
 
 	// Set global limit at 100s (exceeded)
-	ms.SetGlobalLimit(model.LimitCPU, 100)
-	m.checkGlobalEnforcement(nil)
+	ms.SetScopeLimit(model.ScopeHost, model.LimitCPU, 100)
+	m.checkScopeEnforcement(nil, model.ScopeHost)
 
 	paused, _ := md.IsContainerPaused(nil, dockerID)
 	if !paused {
@@ -446,15 +446,15 @@ func TestGlobalEnforcementReleasesWhenLimitIncreased(t *testing.T) {
 	}
 
 	// Increase global limit to 300s (no longer exceeded)
-	ms.SetGlobalLimit(model.LimitCPU, 300)
-	m.checkGlobalEnforcement(nil)
+	ms.SetScopeLimit(model.ScopeHost, model.LimitCPU, 300)
+	m.checkScopeEnforcement(nil, model.ScopeHost)
 
 	paused, _ = md.IsContainerPaused(nil, dockerID)
 	if paused {
 		t.Error("container should be unpaused after global limit increased above usage")
 	}
 
-	if m.IsGlobalEnforced(model.LimitCPU) {
+	if m.IsScopeEnforced(model.ScopeHost, model.LimitCPU) {
 		t.Error("global CPU should not be marked as enforced after release")
 	}
 }
@@ -463,7 +463,10 @@ func TestIsOtherPauseActiveIncludesGlobal(t *testing.T) {
 	m, _, _, _, _, _ := newTestManager()
 
 	m.enforced["c1"] = map[model.LimitType]bool{}
-	m.globalEnforced[model.LimitCPU] = true
+	if m.scopeEnforced[model.ScopeHost] == nil {
+		m.scopeEnforced[model.ScopeHost] = make(map[model.LimitType]bool)
+	}
+	m.scopeEnforced[model.ScopeHost][model.LimitCPU] = true
 
 	// From disk's perspective, global CPU enforcement should count
 	if !m.isOtherPauseActive("c1", model.LimitDisk) {
@@ -569,28 +572,28 @@ func TestGlobalSpendingEnforcementBlocksProxy(t *testing.T) {
 	ms.SetUsage(containerID2, model.LimitSpending, 300)
 
 	// Set global spending limit at 600 (total usage 700 exceeds it)
-	ms.SetGlobalLimit(model.LimitSpending, 600)
+	ms.SetScopeLimit(model.ScopeHost, model.LimitSpending, 600)
 
-	m.checkGlobalEnforcement(nil)
+	m.checkScopeEnforcement(nil, model.ScopeHost)
 
 	// Proxy should be globally blocked
-	if !mp.IsGlobalSpendingBlocked() {
+	if !mp.IsScopeSpendingBlocked(model.ScopeHost) {
 		t.Error("global spending enforcement should set proxy blocked flag")
 	}
 
-	if !m.IsGlobalEnforced(model.LimitSpending) {
+	if !m.IsScopeEnforced(model.ScopeHost, model.LimitSpending) {
 		t.Error("global spending should be marked as enforced")
 	}
 
 	// Now increase global limit so usage < limit → should release
-	ms.SetGlobalLimit(model.LimitSpending, 1000)
-	m.checkGlobalEnforcement(nil)
+	ms.SetScopeLimit(model.ScopeHost, model.LimitSpending, 1000)
+	m.checkScopeEnforcement(nil, model.ScopeHost)
 
-	if mp.IsGlobalSpendingBlocked() {
+	if mp.IsScopeSpendingBlocked(model.ScopeHost) {
 		t.Error("global spending enforcement should clear proxy blocked flag after release")
 	}
 
-	if m.IsGlobalEnforced(model.LimitSpending) {
+	if m.IsScopeEnforced(model.ScopeHost, model.LimitSpending) {
 		t.Error("global spending should not be marked as enforced after release")
 	}
 }

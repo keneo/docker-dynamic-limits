@@ -165,8 +165,8 @@ func main() {
 		}
 	}
 
-	// Start global enforcement
-	em.StartGlobalEnforcement()
+	// Start scope enforcement (host + all segments)
+	em.StartScopeEnforcement()
 
 	// Create API server with config persistence
 	configPath := filepath.Join(filepath.Dir(*dbPath), "config.json")

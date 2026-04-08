@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/keneo/docker-dynamic-limits/internal/cgroup"
@@ -15,23 +16,25 @@ import (
 
 // MockStore implements store.DataStore using in-memory maps.
 type MockStore struct {
-	mu               sync.Mutex
-	Containers       map[string]*model.Container
-	Limits           map[string]map[model.LimitType]int64
-	Usages           map[string]map[model.LimitType]int64
-	GlobalLimits     map[model.LimitType]int64
-	GlobalUsageAccum map[model.LimitType]int64
-	Frozen           map[string]bool
+	mu              sync.Mutex
+	Containers      map[string]*model.Container
+	Limits          map[string]map[model.LimitType]int64
+	Usages          map[string]map[model.LimitType]int64
+	ScopeLimits     map[model.Scope]map[model.LimitType]int64
+	ScopeUsageAccum map[model.Scope]map[model.LimitType]int64
+	Segments        map[string]*model.Segment
+	Frozen          map[string]bool
 }
 
 func NewMockStore() *MockStore {
 	return &MockStore{
-		Containers:       make(map[string]*model.Container),
-		Limits:           make(map[string]map[model.LimitType]int64),
-		Usages:           make(map[string]map[model.LimitType]int64),
-		GlobalLimits:     make(map[model.LimitType]int64),
-		GlobalUsageAccum: make(map[model.LimitType]int64),
-		Frozen:           make(map[string]bool),
+		Containers:      make(map[string]*model.Container),
+		Limits:          make(map[string]map[model.LimitType]int64),
+		Usages:          make(map[string]map[model.LimitType]int64),
+		ScopeLimits:     make(map[model.Scope]map[model.LimitType]int64),
+		ScopeUsageAccum: make(map[model.Scope]map[model.LimitType]int64),
+		Segments:        make(map[string]*model.Segment),
+		Frozen:          make(map[string]bool),
 	}
 }
 
@@ -70,11 +73,30 @@ func (s *MockStore) ListContainers() ([]model.Container, error) {
 func (s *MockStore) RemoveContainer(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	container, ok := s.Containers[id]
+	if !ok {
+		delete(s.Limits, id)
+		delete(s.Usages, id)
+		return nil
+	}
 	// Accumulate cumulative usage types before deleting
 	if usages, ok := s.Usages[id]; ok {
 		for _, lt := range model.CumulativeLimitTypes {
 			if val, exists := usages[lt]; exists && val > 0 {
-				s.GlobalUsageAccum[lt] += val
+				// Accumulate into host scope
+				if s.ScopeUsageAccum[model.ScopeHost] == nil {
+					s.ScopeUsageAccum[model.ScopeHost] = make(map[model.LimitType]int64)
+				}
+				s.ScopeUsageAccum[model.ScopeHost][lt] += val
+
+				// Accumulate into segment scope if container has one
+				if container.SegmentID != "" {
+					scope := model.SegmentScope(container.SegmentID)
+					if s.ScopeUsageAccum[scope] == nil {
+						s.ScopeUsageAccum[scope] = make(map[model.LimitType]int64)
+					}
+					s.ScopeUsageAccum[scope][lt] += val
+				}
 			}
 		}
 	}
@@ -187,35 +209,121 @@ func (s *MockStore) ResolveContainerID(query string) (string, error) {
 	return "", fmt.Errorf("container %q not found", query)
 }
 
-func (s *MockStore) SetGlobalLimit(limitType model.LimitType, value int64) error {
+func (s *MockStore) SetScopeLimit(scope model.Scope, lt model.LimitType, value int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.GlobalLimits[limitType] = value
+	if s.ScopeLimits[scope] == nil {
+		s.ScopeLimits[scope] = make(map[model.LimitType]int64)
+	}
+	s.ScopeLimits[scope][lt] = value
 	return nil
 }
 
-func (s *MockStore) GetGlobalLimit(limitType model.LimitType) (int64, error) {
+func (s *MockStore) GetScopeLimit(scope model.Scope, lt model.LimitType) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.GlobalLimits[limitType], nil
+	if m, ok := s.ScopeLimits[scope]; ok {
+		return m[lt], nil
+	}
+	return 0, nil
 }
 
-func (s *MockStore) GetAllGlobalLimits() (map[model.LimitType]int64, error) {
+func (s *MockStore) GetAllScopeLimits(scope model.Scope) (map[model.LimitType]int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	result := make(map[model.LimitType]int64)
-	for k, v := range s.GlobalLimits {
-		result[k] = v
+	if m, ok := s.ScopeLimits[scope]; ok {
+		for k, v := range m {
+			result[k] = v
+		}
 	}
 	return result, nil
 }
 
-func (s *MockStore) GetGlobalUsageAccum() (map[model.LimitType]int64, error) {
+func (s *MockStore) GetScopeUsageAccum(scope model.Scope) (map[model.LimitType]int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	result := make(map[model.LimitType]int64)
-	for k, v := range s.GlobalUsageAccum {
-		result[k] = v
+	if m, ok := s.ScopeUsageAccum[scope]; ok {
+		for k, v := range m {
+			result[k] = v
+		}
+	}
+	return result, nil
+}
+
+func (s *MockStore) CreateSegment(id, name string) (*model.Segment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.Segments[id]; exists {
+		return nil, fmt.Errorf("segment %s already exists", id)
+	}
+	seg := &model.Segment{
+		ID:        id,
+		Name:      name,
+		CreatedAt: time.Now(),
+	}
+	s.Segments[id] = seg
+	return seg, nil
+}
+
+func (s *MockStore) GetSegment(id string) (*model.Segment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seg, ok := s.Segments[id]
+	if !ok {
+		return nil, fmt.Errorf("segment %s not found", id)
+	}
+	return seg, nil
+}
+
+func (s *MockStore) ListSegments() ([]model.Segment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var result []model.Segment
+	for _, seg := range s.Segments {
+		result = append(result, *seg)
+	}
+	return result, nil
+}
+
+func (s *MockStore) DeleteSegment(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.Segments[id]; !ok {
+		return fmt.Errorf("segment %s not found", id)
+	}
+	delete(s.Segments, id)
+	return nil
+}
+
+func (s *MockStore) SetContainerSegment(containerID string, segmentID *string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.Containers[containerID]
+	if !ok {
+		return fmt.Errorf("container %s not found", containerID)
+	}
+	if segmentID == nil {
+		c.SegmentID = ""
+	} else {
+		c.SegmentID = *segmentID
+	}
+	return nil
+}
+
+func (s *MockStore) ListContainersByScope(scope model.Scope) ([]model.Container, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var result []model.Container
+	for _, c := range s.Containers {
+		if scope == model.ScopeHost {
+			// Host scope sees all containers
+			result = append(result, *c)
+		} else if scope.IsSegment() && c.SegmentID == scope.SegmentID() {
+			// Segment scope sees only containers in that segment
+			result = append(result, *c)
+		}
 	}
 	return result, nil
 }
@@ -551,22 +659,23 @@ func (c *MockCgroup) ReadNetworkStats(vethName string) (*cgroup.NetworkStats, er
 
 // MockEnforcement implements enforcement.EnforcementController.
 type MockEnforcement struct {
-	mu              sync.Mutex
-	Started         map[string]string          // containerID -> dockerID
-	Stopped         []string
-	Enforced        map[string]map[model.LimitType]bool
-	FrozenMap       map[string]bool
-	Notified        []string
-	GlobalEnforced  map[model.LimitType]bool
-	GlobalStarted   bool
+	mu            sync.Mutex
+	Started       map[string]string          // containerID -> dockerID
+	Stopped       []string
+	Enforced      map[string]map[model.LimitType]bool
+	FrozenMap     map[string]bool
+	Notified      []string
+	ScopeEnforced map[model.Scope]map[model.LimitType]bool
+	ScopeStarted  map[model.Scope]bool
 }
 
 func NewMockEnforcement() *MockEnforcement {
 	return &MockEnforcement{
-		Started:        make(map[string]string),
-		Enforced:       make(map[string]map[model.LimitType]bool),
-		FrozenMap:      make(map[string]bool),
-		GlobalEnforced: make(map[model.LimitType]bool),
+		Started:       make(map[string]string),
+		Enforced:      make(map[string]map[model.LimitType]bool),
+		FrozenMap:     make(map[string]bool),
+		ScopeEnforced: make(map[model.Scope]map[model.LimitType]bool),
+		ScopeStarted:  make(map[model.Scope]bool),
 	}
 }
 
@@ -637,24 +746,30 @@ func (e *MockEnforcement) WasNotified() bool {
 	return len(e.Notified) > 0
 }
 
-func (e *MockEnforcement) StartGlobalEnforcement() {
+func (e *MockEnforcement) StartScopeEnforcement() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.GlobalStarted = true
+	// Mark all scopes as started (generic start)
+	e.ScopeStarted[model.ScopeHost] = true
 }
 
-func (e *MockEnforcement) IsGlobalEnforced(lt model.LimitType) bool {
+func (e *MockEnforcement) IsScopeEnforced(scope model.Scope, lt model.LimitType) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.GlobalEnforced[lt]
+	if m, ok := e.ScopeEnforced[scope]; ok {
+		return m[lt]
+	}
+	return false
 }
 
-func (e *MockEnforcement) GetGlobalEnforced() map[model.LimitType]bool {
+func (e *MockEnforcement) GetScopeEnforced(scope model.Scope) map[model.LimitType]bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	result := make(map[model.LimitType]bool)
-	for k, v := range e.GlobalEnforced {
-		result[k] = v
+	if m, ok := e.ScopeEnforced[scope]; ok {
+		for k, v := range m {
+			result[k] = v
+		}
 	}
 	return result
 }
@@ -691,20 +806,21 @@ func (e *MockEnforcement) IsFrozen(containerID string) bool {
 
 // MockProxy implements proxy.SpendingProxy with in-memory state.
 type MockProxy struct {
-	mu                    sync.Mutex
-	Spending              map[string]int64
-	Budgets               map[string]int64
-	Addrs                 map[string]string
-	Activity              map[string][]proxy.ProxyActivity
-	GlobalSpendingBlocked bool
+	mu                   sync.Mutex
+	Spending             map[string]int64
+	Budgets              map[string]int64
+	Addrs                map[string]string
+	Activity             map[string][]proxy.ProxyActivity
+	ScopeSpendingBlocked map[model.Scope]bool
 }
 
 func NewMockProxy() *MockProxy {
 	return &MockProxy{
-		Spending: make(map[string]int64),
-		Budgets:  make(map[string]int64),
-		Addrs:    make(map[string]string),
-		Activity: make(map[string][]proxy.ProxyActivity),
+		Spending:             make(map[string]int64),
+		Budgets:              make(map[string]int64),
+		Addrs:                make(map[string]string),
+		Activity:             make(map[string][]proxy.ProxyActivity),
+		ScopeSpendingBlocked: make(map[model.Scope]bool),
 	}
 }
 
@@ -769,15 +885,15 @@ func (p *MockProxy) RecordActivity(containerID string, a proxy.ProxyActivity) {
 	p.Activity[containerID] = append(p.Activity[containerID], a)
 }
 
-func (p *MockProxy) SetGlobalSpendingBlocked(blocked bool) {
+func (p *MockProxy) SetScopeSpendingBlocked(scope model.Scope, blocked bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.GlobalSpendingBlocked = blocked
+	p.ScopeSpendingBlocked[scope] = blocked
 }
 
-// IsGlobalSpendingBlocked returns the current global spending blocked state.
-func (p *MockProxy) IsGlobalSpendingBlocked() bool {
+// IsScopeSpendingBlocked returns the spending blocked state for a scope.
+func (p *MockProxy) IsScopeSpendingBlocked(scope model.Scope) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.GlobalSpendingBlocked
+	return p.ScopeSpendingBlocked[scope]
 }

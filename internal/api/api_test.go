@@ -969,7 +969,7 @@ func TestSetGlobalLimit(t *testing.T) {
 	}
 
 	// Verify stored
-	lim, _ := ms.GetGlobalLimit(model.LimitCPU)
+	lim, _ := ms.GetScopeLimit(model.ScopeHost, model.LimitCPU)
 	if lim != 86400 {
 		t.Errorf("stored global limit = %d, want 86400", lim)
 	}
@@ -979,7 +979,7 @@ func TestIncreaseGlobalLimit(t *testing.T) {
 	ts, ms, _, _, _, _ := newTestServer()
 	defer ts.Close()
 
-	ms.SetGlobalLimit(model.LimitCPU, 100)
+	ms.SetScopeLimit(model.ScopeHost, model.LimitCPU, 100)
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"type":      "cpu",
@@ -994,7 +994,7 @@ func TestIncreaseGlobalLimit(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	lim, _ := ms.GetGlobalLimit(model.LimitCPU)
+	lim, _ := ms.GetScopeLimit(model.ScopeHost, model.LimitCPU)
 	if lim != 150 {
 		t.Errorf("global limit = %d, want 150", lim)
 	}
@@ -1004,7 +1004,7 @@ func TestDecreaseGlobalLimit(t *testing.T) {
 	ts, ms, _, _, _, _ := newTestServer()
 	defer ts.Close()
 
-	ms.SetGlobalLimit(model.LimitCPU, 100)
+	ms.SetScopeLimit(model.ScopeHost, model.LimitCPU, 100)
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"type":      "cpu",
@@ -1019,7 +1019,7 @@ func TestDecreaseGlobalLimit(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	lim, _ := ms.GetGlobalLimit(model.LimitCPU)
+	lim, _ := ms.GetScopeLimit(model.ScopeHost, model.LimitCPU)
 	if lim != 0 {
 		t.Errorf("global limit = %d, want 0 (floor)", lim)
 	}
@@ -1029,7 +1029,7 @@ func TestContainersResponseIncludesGlobalLimits(t *testing.T) {
 	ts, ms, _, _, _, _ := newTestServer()
 	defer ts.Close()
 
-	ms.SetGlobalLimit(model.LimitCPU, 86400)
+	ms.SetScopeLimit(model.ScopeHost, model.LimitCPU, 86400)
 
 	resp, err := http.Get(ts.URL + "/containers")
 	if err != nil {
@@ -1064,7 +1064,7 @@ func TestKeepLimitsConsistentRejectsIncrease(t *testing.T) {
 	dockerID2 := "bbbbbbbbbbbb000000"
 	c1, _ := ms.RegisterContainer(dockerID1, "c1")
 	c2, _ := ms.RegisterContainer(dockerID2, "c2")
-	ms.SetGlobalLimit(model.LimitCPU, 100)
+	ms.SetScopeLimit(model.ScopeHost, model.LimitCPU, 100)
 	ms.SetLimit(c1.ID, model.LimitCPU, 60)
 
 	// Increase container 2 CPU by 50 → should be rejected (max increase is 40)
@@ -1111,7 +1111,7 @@ func TestKeepLimitsConsistentCapsSet(t *testing.T) {
 	c1, _ := ms.RegisterContainer(dockerID1, "c1")
 	c2, _ := ms.RegisterContainer(dockerID2, "c2")
 
-	ms.SetGlobalLimit(model.LimitCPU, 100)
+	ms.SetScopeLimit(model.ScopeHost, model.LimitCPU, 100)
 	ms.SetLimit(c1.ID, model.LimitCPU, 60)
 	_ = c2
 
@@ -1159,7 +1159,7 @@ func TestKeepLimitsConsistentRejectsGlobalDecrease(t *testing.T) {
 
 	dockerID := "aaaaaaaaaaaa000000"
 	c, _ := ms.RegisterContainer(dockerID, "c1")
-	ms.SetGlobalLimit(model.LimitCPU, 100)
+	ms.SetScopeLimit(model.ScopeHost, model.LimitCPU, 100)
 	ms.SetLimit(c.ID, model.LimitCPU, 60)
 
 	// Decrease global to 50 → should be rejected (min_value: 60)
@@ -1203,7 +1203,7 @@ func TestKeepLimitsConsistentAllowsDecrease(t *testing.T) {
 
 	dockerID := "aaaaaaaaaaaa000000"
 	c, _ := ms.RegisterContainer(dockerID, "c1")
-	ms.SetGlobalLimit(model.LimitCPU, 100)
+	ms.SetScopeLimit(model.ScopeHost, model.LimitCPU, 100)
 	ms.SetLimit(c.ID, model.LimitCPU, 60)
 
 	// Decrease container CPU limit → always allowed
@@ -1282,7 +1282,7 @@ func TestKeepLimitsConsistentCannotEnableWhenInconsistent(t *testing.T) {
 	// Set up inconsistent state: per-container limits sum > global limit
 	dockerID := "aaaaaaaaaaaa000000"
 	c, _ := ms.RegisterContainer(dockerID, "c1")
-	ms.SetGlobalLimit(model.LimitCPU, 50)
+	ms.SetScopeLimit(model.ScopeHost, model.LimitCPU, 50)
 	ms.SetLimit(c.ID, model.LimitCPU, 100) // exceeds global
 
 	// Try to enable keep_limits_consistent → should fail
@@ -1316,10 +1316,13 @@ func TestKeepLimitsConsistentFactorsAccumulatedUsage(t *testing.T) {
 	// Register container and set global limit
 	dockerID := "aaaaaaaaaaaa000001"
 	c, _ := ms.RegisterContainer(dockerID, "alive")
-	ms.SetGlobalLimit(model.LimitSpending, 1000) // $10
+	ms.SetScopeLimit(model.ScopeHost, model.LimitSpending, 1000) // $10
 
 	// Simulate accumulated spending from dead containers
-	ms.GlobalUsageAccum[model.LimitSpending] = 600 // $6 spent by dead containers
+	if ms.ScopeUsageAccum[model.ScopeHost] == nil {
+		ms.ScopeUsageAccum[model.ScopeHost] = make(map[model.LimitType]int64)
+	}
+	ms.ScopeUsageAccum[model.ScopeHost][model.LimitSpending] = 600 // $6 spent by dead containers
 
 	// Try to set per-container limit to 500 ($5) — should be capped to 400 ($4)
 	// because maxAllowed = 1000 - 0 (other containers) - 600 (accum) = 400
@@ -1399,8 +1402,11 @@ func TestKeepLimitsConsistentCannotEnableWithAccumExceeding(t *testing.T) {
 	defer ts.Close()
 
 	// Set global limit and accumulated usage that exceeds it
-	ms.SetGlobalLimit(model.LimitSpending, 500)
-	ms.GlobalUsageAccum[model.LimitSpending] = 600 // accum alone exceeds global
+	ms.SetScopeLimit(model.ScopeHost, model.LimitSpending, 500)
+	if ms.ScopeUsageAccum[model.ScopeHost] == nil {
+		ms.ScopeUsageAccum[model.ScopeHost] = make(map[model.LimitType]int64)
+	}
+	ms.ScopeUsageAccum[model.ScopeHost][model.LimitSpending] = 600 // accum alone exceeds global
 
 	// Try to enable keep_limits_consistent → should fail
 	body, _ := json.Marshal(map[string]interface{}{
