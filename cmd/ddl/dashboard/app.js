@@ -10,6 +10,16 @@
     let refreshTimer = null;
     let selectedIDs = new Set();
 
+    // Segment scope from URL query parameter
+    var urlParams = new URLSearchParams(window.location.search);
+    var segmentScope = urlParams.get('segment') || '';
+    var isSegmentScoped = segmentScope !== '';
+
+    // Adjust API base for segment-scoped dashboard
+    function apiPath(path) {
+        return path;
+    }
+
     // --- DOM refs ---
     const tbody = document.getElementById('container-tbody');
     const emptyMsg = document.getElementById('empty-msg');
@@ -363,12 +373,13 @@
 
     // --- Data fetching ---
     function refresh() {
-        api('GET', '/containers').then(function (data) {
+        var endpoint = isSegmentScoped ? '/segments/' + segmentScope + '/containers' : '/containers';
+        api('GET', endpoint).then(function (data) {
             if (data && data.containers) {
                 containers = data.containers || [];
-                globalLimits = data.global_limits || {};
-                globalUsage = data.global_usage || {};
-                globalEnforced = data.global_enforced || {};
+                globalLimits = data.host_limits || data.global_limits || data.scope_limits || {};
+                globalUsage = data.host_usage || data.global_usage || data.scope_usage || {};
+                globalEnforced = data.host_enforced || data.global_enforced || data.scope_enforced || {};
             } else {
                 containers = data || [];
                 globalLimits = {};
@@ -861,15 +872,17 @@
                 return;
             }
 
-            api('PUT', '/global-limits', {
+            var limitEndpoint = isSegmentScoped ? '/segments/' + segmentScope + '/limits' : '/host-limits';
+            api('PUT', limitEndpoint, {
                 type: type,
                 value: value,
                 operation: operation
             }).then(function () {
-                toast('Global limit ' + operation + ': ' + type);
+                var label = isSegmentScoped ? 'Segment' : 'Host';
+                toast(label + ' limit ' + operation + ': ' + type);
                 refresh();
             }).catch(function (err) {
-                toast('Global limit failed: ' + err.message, true);
+                toast('Limit failed: ' + err.message, true);
             });
         }
     });
@@ -931,6 +944,19 @@
     }
 
     // --- Init ---
+    // Set scope badge and title
+    var scopeBadge = document.getElementById('scope-badge');
+    if (isSegmentScoped && scopeBadge) {
+        scopeBadge.textContent = '[' + segmentScope + ']';
+        scopeBadge.style.cssText = 'font-size:0.6em;color:var(--accent);font-weight:normal;';
+        document.title = 'DDL - ' + segmentScope;
+    }
+    // Update panel header
+    var globalPanelHeader = document.querySelector('#global-panel h2');
+    if (globalPanelHeader) {
+        globalPanelHeader.textContent = isSegmentScoped ? 'Segment Limits' : 'Host Limits';
+    }
+
     refresh();
     startAutoRefresh();
 })();

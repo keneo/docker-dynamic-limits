@@ -146,8 +146,14 @@ func runDashboard(listen string, open bool) error {
 
 	addr := ln.Addr().String()
 	dashURL := fmt.Sprintf("http://localhost:%d", ln.Addr().(*net.TCPAddr).Port)
+	if segmentScope != "" {
+		dashURL += "?segment=" + segmentScope
+	}
 	fmt.Printf("Dashboard: %s\n", dashURL)
 	fmt.Printf("API proxy: %s -> %s\n", addr, apiURL)
+	if segmentScope != "" {
+		fmt.Printf("Scope: segment %q\n", segmentScope)
+	}
 
 	writePidFile()
 	defer removePidFile()
