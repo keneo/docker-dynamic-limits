@@ -31,6 +31,7 @@ on the sum of usage across all member containers, in addition to host limits.`,
 	cmd.AddCommand(segmentsUsageCmd())
 	cmd.AddCommand(segmentsFreezeAllCmd())
 	cmd.AddCommand(segmentsUnfreezeAllCmd())
+	cmd.AddCommand(segmentsConfigCmd())
 
 	return cmd
 }
@@ -390,4 +391,70 @@ func segmentsUnfreezeAllCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func segmentsConfigCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "config",
+		Short: "Manage per-segment configuration",
+		Long: `View or set per-segment config overrides.
+Segment config inherits from host config. Only explicitly set keys override.
+
+Supported keys: anthropic-enabled, openai-enabled, ollama-enabled,
+anthropic-key, openai-key, ollama-models, error-webhooks`,
+	}
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "get <segment>",
+		Short: "Show effective config for a segment",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiGet("/segments/" + args[0] + "/config")
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return printJSON(resp)
+			}
+			// Show overrides separately
+			overrides, _ := resp["_segment_overrides"].(map[string]interface{})
+			delete(resp, "_segment_overrides")
+
+			fmt.Printf("Effective config for segment %q:\n", args[0])
+			for k, v := range resp {
+				marker := ""
+				if _, ok := overrides[k]; ok {
+					marker = " (override)"
+				}
+				fmt.Printf("  %s: %v%s\n", k, v, marker)
+			}
+			return nil
+		},
+	})
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "set <segment> <key> <value>",
+		Short: "Set a config override for a segment",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			segID, key, value := args[0], args[1], args[2]
+			body, _ := json.Marshal(map[string]interface{}{key: value})
+			req, _ := http.NewRequest(http.MethodPut,
+				apiURL+"/segments/"+segID+"/config", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				return wrapConnErr(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return readAPIError(resp)
+			}
+			fmt.Printf("segment %s config %s updated\n", segID, key)
+			return nil
+		},
+	})
+
+	return cmd
 }

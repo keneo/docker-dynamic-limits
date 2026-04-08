@@ -1504,6 +1504,8 @@ func (s *Server) handleSegmentRoutes(w http.ResponseWriter, r *http.Request) {
 		s.handleSegmentFreezeAll(w, r, segID)
 	case "unfreeze-all":
 		s.handleSegmentUnfreezeAll(w, r, segID)
+	case "config":
+		s.handleSegmentConfig(w, r, segID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -1836,6 +1838,51 @@ func (s *Server) handleSegmentUnfreezeAll(w http.ResponseWriter, r *http.Request
 		}
 	}
 	writeJSON(w, map[string]interface{}{"unfrozen": unfrozen, "count": len(unfrozen)})
+}
+
+func (s *Server) handleSegmentConfig(w http.ResponseWriter, r *http.Request, segID string) {
+	if _, err := s.store.GetSegment(segID); err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		// Return effective config: segment overrides merged with host defaults
+		segCfg, err := s.store.GetAllSegmentConfig(segID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		// Build effective config starting from host config, overlaying segment overrides
+		effective := s.buildConfigResponse()
+		for k, v := range segCfg {
+			effective[k] = v
+		}
+		effective["_segment_overrides"] = segCfg
+		writeJSON(w, effective)
+
+	case http.MethodPut:
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid JSON: %w", err))
+			return
+		}
+
+		for key, val := range req {
+			strVal := fmt.Sprintf("%v", val)
+			if err := s.store.SetSegmentConfig(segID, key, strVal); err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+		}
+
+		writeJSON(w, map[string]interface{}{"updated": len(req), "segment": segID})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // --- Scoped Listeners ---

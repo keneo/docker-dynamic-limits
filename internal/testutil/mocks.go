@@ -23,6 +23,7 @@ type MockStore struct {
 	ScopeLimits     map[model.Scope]map[model.LimitType]int64
 	ScopeUsageAccum map[model.Scope]map[model.LimitType]int64
 	Segments        map[string]*model.Segment
+	SegmentConfigs  map[string]map[string]string
 	Frozen          map[string]bool
 }
 
@@ -339,6 +340,51 @@ func (s *MockStore) IsFrozen(containerID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.Frozen[containerID], nil
+}
+
+func (s *MockStore) SetSegmentConfig(segmentID, key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.SegmentConfigs == nil {
+		s.SegmentConfigs = make(map[string]map[string]string)
+	}
+	if s.SegmentConfigs[segmentID] == nil {
+		s.SegmentConfigs[segmentID] = make(map[string]string)
+	}
+	s.SegmentConfigs[segmentID][key] = value
+	return nil
+}
+
+func (s *MockStore) GetSegmentConfig(segmentID, key string) (string, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cfg, ok := s.SegmentConfigs[segmentID]; ok {
+		if v, found := cfg[key]; found {
+			return v, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func (s *MockStore) GetAllSegmentConfig(segmentID string) (map[string]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make(map[string]string)
+	if cfg, ok := s.SegmentConfigs[segmentID]; ok {
+		for k, v := range cfg {
+			result[k] = v
+		}
+	}
+	return result, nil
+}
+
+func (s *MockStore) DeleteSegmentConfig(segmentID, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cfg, ok := s.SegmentConfigs[segmentID]; ok {
+		delete(cfg, key)
+	}
+	return nil
 }
 
 // --- MockDocker ---

@@ -42,6 +42,12 @@ type DataStore interface {
 	DeleteSegment(id string) error
 	SetContainerSegment(containerID string, segmentID *string) error
 	ListContainersByScope(scope model.Scope) ([]model.Container, error)
+
+	// Segment config
+	SetSegmentConfig(segmentID, key, value string) error
+	GetSegmentConfig(segmentID, key string) (string, bool, error)
+	GetAllSegmentConfig(segmentID string) (map[string]string, error)
+	DeleteSegmentConfig(segmentID, key string) error
 }
 
 // Store provides persistent storage for container registrations, limits, and usage.
@@ -141,6 +147,16 @@ func (s *Store) migrate() error {
 		created_at TEXT NOT NULL
 	)`); err != nil {
 		return fmt.Errorf("create segments: %w", err)
+	}
+
+	// Segment config table (key-value per segment)
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS segment_config (
+		segment_id TEXT NOT NULL,
+		key TEXT NOT NULL,
+		value TEXT NOT NULL,
+		PRIMARY KEY (segment_id, key)
+	)`); err != nil {
+		return fmt.Errorf("create segment_config: %w", err)
 	}
 
 	return nil
@@ -592,6 +608,66 @@ func (s *Store) ListContainersByScope(scope model.Scope) ([]model.Container, err
 		result = append(result, c)
 	}
 	return result, rows.Err()
+}
+
+// --- Segment config ---
+
+// SetSegmentConfig sets a config key for a segment.
+func (s *Store) SetSegmentConfig(segmentID, key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO segment_config (segment_id, key, value) VALUES (?, ?, ?)`,
+		segmentID, key, value,
+	)
+	return err
+}
+
+// GetSegmentConfig retrieves a config key for a segment.
+func (s *Store) GetSegmentConfig(segmentID, key string) (string, bool, error) {
+	row := s.db.QueryRow(
+		`SELECT value FROM segment_config WHERE segment_id = ? AND key = ?`,
+		segmentID, key,
+	)
+	var val string
+	if err := row.Scan(&val); err != nil {
+		if err == sql.ErrNoRows {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return val, true, nil
+}
+
+// GetAllSegmentConfig returns all config for a segment.
+func (s *Store) GetAllSegmentConfig(segmentID string) (map[string]string, error) {
+	rows, err := s.db.Query(
+		`SELECT key, value FROM segment_config WHERE segment_id = ?`, segmentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[string]string)
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		result[k] = v
+	}
+	return result, rows.Err()
+}
+
+// DeleteSegmentConfig removes a config key for a segment.
+func (s *Store) DeleteSegmentConfig(segmentID, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(
+		`DELETE FROM segment_config WHERE segment_id = ? AND key = ?`,
+		segmentID, key,
+	)
+	return err
 }
 
 // SetFrozen sets the frozen state for a container.
