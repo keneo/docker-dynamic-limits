@@ -29,7 +29,12 @@ Event types:
   usage_update               Per-container usage snapshot (every ~1s per container)
   limit_change               A limit was set, increased, or decreased
   enforcement_change         Enforcement was applied or released
-  global_enforcement_change  A global limit was enforced or released
+  global_enforcement_change  A host/global limit was enforced or released (compat alias)
+  scope_enforcement_change   A scope (host or segment) limit was enforced or released
+  segment_create             A segment was created
+  segment_delete             A segment was deleted
+  container_assign           A container was assigned to a segment
+  container_unassign         A container was removed from a segment
   container_register         A new container was registered
   container_remove           A container was removed from management
   container_frozen           A container was frozen (paused + byte-sec suspended)
@@ -49,6 +54,11 @@ Event payloads (visible with --raw):
   limit_change               {limit_type, old_value, new_value, operation}
   enforcement_change         {limit_type, enforced}
   global_enforcement_change  {limit_type, enforced}
+  scope_enforcement_change   {scope, limit_type, enforced}
+  segment_create             {segment_id, name}
+  segment_delete             {segment_id}
+  container_assign           {segment_id}
+  container_unassign         {segment_id}
   container_register         {docker_id, name}
   container_remove           {}
   container_frozen           {}
