@@ -402,13 +402,13 @@
     // --- Data fetching ---
     function refresh() {
         api('GET', '/containers').then(function (data) {
-            if (data && data.containers) {
-                containers = data.containers || [];
+            if (data && typeof data === 'object' && !Array.isArray(data) && ('containers' in data)) {
+                containers = Array.isArray(data.containers) ? data.containers : [];
                 globalLimits = data.host_limits || data.global_limits || data.scope_limits || {};
                 globalUsage = data.host_usage || data.global_usage || data.scope_usage || {};
                 globalEnforced = data.host_enforced || data.global_enforced || data.scope_enforced || {};
             } else {
-                containers = data || [];
+                containers = Array.isArray(data) ? data : [];
                 globalLimits = {};
                 globalUsage = {};
                 globalEnforced = {};
