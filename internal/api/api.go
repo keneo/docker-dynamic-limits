@@ -325,6 +325,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		ContainerID string `json:"container_id"`
+		SegmentID   string `json:"segment_id,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -333,6 +334,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if req.ContainerID == "" {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("container_id required"))
 		return
+	}
+
+	// Validate segment if provided
+	if req.SegmentID != "" {
+		if _, err := s.store.GetSegment(req.SegmentID); err != nil {
+			writeError(w, http.StatusNotFound, fmt.Errorf("segment %q not found", req.SegmentID))
+			return
+		}
 	}
 
 	// Inspect the Docker container to validate it exists
@@ -349,6 +358,23 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+
+	// Assign to segment if specified
+	if req.SegmentID != "" {
+		if err := s.store.SetContainerSegment(c.ID, &req.SegmentID); err != nil {
+			log.Printf("[api] warning: failed to assign container to segment: %v", err)
+		} else {
+			c.SegmentID = req.SegmentID
+			if st, ok := s.proxy.(*proxy.SpendingTracker); ok {
+				st.SetContainerScope(c.ID, model.SegmentScope(req.SegmentID))
+			}
+			if s.bus != nil {
+				s.bus.PublishData(events.ContainerAssign, c.ID, events.ContainerAssignData{
+					SegmentID: req.SegmentID,
+				})
+			}
+		}
 	}
 
 	// Start enforcement
@@ -1484,18 +1510,61 @@ func (s *Server) handleSegmentRoutes(w http.ResponseWriter, r *http.Request) {
 		if sub2 == "" {
 			s.handleSegmentContainers(w, r, segID)
 		} else {
-			// /segments/{id}/containers/{cid}/assign or /unassign
+			// /segments/{id}/containers/{cid}[/sub]
 			cParts := strings.SplitN(sub2, "/", 2)
 			cid := cParts[0]
 			action := ""
 			if len(cParts) > 1 {
 				action = cParts[1]
 			}
+
+			// Resolve and validate container is in this segment
+			containerID, err := s.store.ResolveContainerID(cid)
+			if err != nil {
+				writeError(w, http.StatusNotFound, err)
+				return
+			}
+
 			switch action {
 			case "assign":
-				s.handleSegmentAssign(w, r, segID, cid)
+				s.handleSegmentAssign(w, r, segID, containerID)
+				return
 			case "unassign":
-				s.handleSegmentUnassign(w, r, segID, cid)
+				s.handleSegmentUnassign(w, r, segID, containerID)
+				return
+			}
+
+			// For all other sub-actions, container must belong to this segment
+			c, err := s.store.GetContainer(containerID)
+			if err != nil {
+				writeError(w, http.StatusNotFound, err)
+				return
+			}
+			if c.SegmentID != segID {
+				writeError(w, http.StatusForbidden, fmt.Errorf("container %s is not in segment %q", containerID, segID))
+				return
+			}
+
+			// Dispatch to main handlers with resolved container ID
+			switch action {
+			case "":
+				s.handleContainerInfo(w, r, containerID)
+			case "limits":
+				s.handleLimits(w, r, containerID)
+			case "usage":
+				s.handleUsage(w, r, containerID)
+			case "clone":
+				s.handleClone(w, r, containerID)
+			case "activity":
+				s.handleActivity(w, r, containerID)
+			case "freeze":
+				s.handleFreeze(w, r, containerID)
+			case "unfreeze":
+				s.handleUnfreeze(w, r, containerID)
+			case "ollama/bid":
+				s.handleOllamaBidForContainer(w, r, containerID)
+			case "ollama/queue":
+				s.handleOllamaCancelForContainer(w, r, containerID)
 			default:
 				http.NotFound(w, r)
 			}
@@ -1506,6 +1575,9 @@ func (s *Server) handleSegmentRoutes(w http.ResponseWriter, r *http.Request) {
 		s.handleSegmentUnfreezeAll(w, r, segID)
 	case "config":
 		s.handleSegmentConfig(w, r, segID)
+	case "events":
+		// Scoped events stream — delegate to main handler (client filters)
+		s.handleEvents(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -1696,12 +1768,18 @@ func (s *Server) handleSegmentContainers(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Aggregate segment usage
+	segUsage := make(map[model.LimitType]int64)
 	var statuses []map[string]interface{}
 	for _, c := range containers {
 		limits, _ := s.store.GetAllLimits(c.ID)
 		usage, _ := s.store.GetAllUsage(c.ID)
 		enforced := s.enforcement.GetEnforced(c.ID)
 		state := s.getContainerState(c.DockerID)
+
+		for lt, v := range usage {
+			segUsage[lt] += v
+		}
 
 		statuses = append(statuses, map[string]interface{}{
 			"container": c,
@@ -1712,8 +1790,28 @@ func (s *Server) handleSegmentContainers(w http.ResponseWriter, r *http.Request,
 			"frozen":    s.enforcement.IsFrozen(c.ID),
 		})
 	}
+	if accum, err := s.store.GetScopeUsageAccum(scope); err == nil {
+		for lt, v := range accum {
+			segUsage[lt] += v
+		}
+	}
 
-	writeJSON(w, map[string]interface{}{"containers": statuses})
+	segLimits, _ := s.store.GetAllScopeLimits(scope)
+	segEnforced := s.enforcement.GetScopeEnforced(scope)
+
+	// Response structure mirrors /containers so dashboard works with either endpoint.
+	// host_* fields are populated with segment data when scoped (dashboard's top panel
+	// then shows segment limits).
+	writeJSON(w, map[string]interface{}{
+		"containers":      statuses,
+		"host_limits":     segLimits,
+		"host_usage":      segUsage,
+		"host_enforced":   segEnforced,
+		"global_limits":   segLimits,
+		"global_usage":    segUsage,
+		"global_enforced": segEnforced,
+		"scope":           string(scope),
+	})
 }
 
 func (s *Server) handleSegmentAssign(w http.ResponseWriter, r *http.Request, segID, containerID string) {

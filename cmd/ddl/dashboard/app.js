@@ -10,15 +10,12 @@
     let refreshTimer = null;
     let selectedIDs = new Set();
 
+    let segments = [];
+
     // Segment scope from URL query parameter
     var urlParams = new URLSearchParams(window.location.search);
     var segmentScope = urlParams.get('segment') || '';
     var isSegmentScoped = segmentScope !== '';
-
-    // Adjust API base for segment-scoped dashboard
-    function apiPath(path) {
-        return path;
-    }
 
     // --- DOM refs ---
     const tbody = document.getElementById('container-tbody');
@@ -170,13 +167,33 @@
     }
 
     // --- API helpers ---
+    // When segment-scoped, rewrite paths to go through /segments/{id}/...
+    function scopedPath(path) {
+        if (!isSegmentScoped) return path;
+        // Paths that should NOT be rewritten (segment management itself, global endpoints)
+        if (path.indexOf('/segments') === 0) return path;
+        if (path === '/config') return '/segments/' + segmentScope + '/config';
+        if (path === '/containers') return '/segments/' + segmentScope + '/containers';
+        // Rewrite /containers/{id}... -> /segments/{seg}/containers/{id}...
+        if (path.indexOf('/containers/') === 0) {
+            return '/segments/' + segmentScope + path;
+        }
+        if (path === '/events') return '/segments/' + segmentScope + '/events';
+        // Host limits: not available on segment scope — should use segment limits
+        if (path === '/host-limits' || path === '/global-limits') {
+            return '/segments/' + segmentScope + '/limits';
+        }
+        // /register: assign to segment on register
+        return path;
+    }
+
     function api(method, path, body) {
         var opts = { method: method, headers: {} };
         if (body !== undefined) {
             opts.headers['Content-Type'] = 'application/json';
             opts.body = JSON.stringify(body);
         }
-        return fetch('/api' + path, opts).then(function (resp) {
+        return fetch('/api' + scopedPath(path), opts).then(function (resp) {
             if (!resp.ok) {
                 return resp.json().catch(function () { return {}; }).then(function (err) {
                     throw new Error(err.error || 'HTTP ' + resp.status);
@@ -225,10 +242,13 @@
 
             var frozenBadge = cs.frozen ? ' <span class="frozen-badge">FROZEN</span>' : '';
 
+            var segBadge = c.segment_id ? '<span class="segment-badge">' + esc(c.segment_id) + '</span>' : '<span class="segment-none">-</span>';
+
             tr.innerHTML =
                 '<td class="col-check"><input type="checkbox"' + (selectedIDs.has(c.id) ? ' checked' : '') + '></td>' +
                 '<td><code>' + esc(c.id) + '</code></td>' +
                 '<td>' + esc(c.name || '-') + frozenBadge + '</td>' +
+                '<td>' + segBadge + '</td>' +
                 '<td><span class="' + stateClass + '">' + esc(state) + '</span></td>' +
                 '<td>' + limitCount + '</td>' +
                 '<td>' + enforcedCount + (enforcedCount > 0 ? ' <span class="enforced-badge">ENFORCED</span>' : '') + '</td>' +
@@ -269,6 +289,14 @@
                 ? function () { unfreezeContainer(c.id); }
                 : function () { freezeContainer(c.id); };
             actions.appendChild(freezeBtn);
+
+            if (!isSegmentScoped) {
+                var segBtn = document.createElement('button');
+                segBtn.className = 'btn btn-sm';
+                segBtn.textContent = 'Segment';
+                segBtn.onclick = (function (id) { return function () { openAssignDialog(id); }; })(c.id);
+                actions.appendChild(segBtn);
+            }
 
             var cloneBtn = document.createElement('button');
             cloneBtn.className = 'btn btn-sm';
@@ -373,8 +401,7 @@
 
     // --- Data fetching ---
     function refresh() {
-        var endpoint = isSegmentScoped ? '/segments/' + segmentScope + '/containers' : '/containers';
-        api('GET', endpoint).then(function (data) {
+        api('GET', '/containers').then(function (data) {
             if (data && data.containers) {
                 containers = data.containers || [];
                 globalLimits = data.host_limits || data.global_limits || data.scope_limits || {};
@@ -394,6 +421,13 @@
             renderDetail();
             renderGlobalLimits();
             if (selectedID) fetchActivity(selectedID);
+            // Fetch segments
+            if (!isSegmentScoped) {
+                api('GET', '/segments').then(function (data) {
+                    segments = (data && data.segments) || [];
+                    renderSegments();
+                });
+            }
         }).catch(function (err) {
             offlineBanner.hidden = false;
             statusIndicator.className = 'status disconnected';
@@ -737,7 +771,9 @@
         if (dialog.returnValue !== 'cancel') {
             var containerID = document.getElementById('register-id').value.trim();
             if (!containerID) return;
-            api('POST', '/register', { container_id: containerID }).then(function (result) {
+            var body = { container_id: containerID };
+            if (isSegmentScoped) body.segment_id = segmentScope;
+            api('POST', '/register', body).then(function (result) {
                 toast('Registered: ' + result.id);
                 refresh();
             }).catch(function (err) {
@@ -872,8 +908,7 @@
                 return;
             }
 
-            var limitEndpoint = isSegmentScoped ? '/segments/' + segmentScope + '/limits' : '/host-limits';
-            api('PUT', limitEndpoint, {
+            api('PUT', '/host-limits', {
                 type: type,
                 value: value,
                 operation: operation
@@ -942,6 +977,168 @@
             configTbody.appendChild(tr);
         });
     }
+
+    // --- Segments ---
+    var segmentsPanel = document.getElementById('segments-panel');
+    var segmentsList = document.getElementById('segments-list');
+
+    function renderSegments() {
+        if (!segmentsPanel) return;
+        segmentsPanel.hidden = segments.length === 0;
+        if (segments.length === 0) return;
+
+        var html = '';
+        segments.forEach(function (seg) {
+            // Count containers in this segment
+            var memberCount = 0;
+            containers.forEach(function (cs) {
+                if (cs.container.segment_id === seg.id) memberCount++;
+            });
+
+            html +=
+                '<div class="segment-card" data-seg-id="' + esc(seg.id) + '">' +
+                    '<div class="segment-card-header">' +
+                        '<strong>' + esc(seg.id) + '</strong>' +
+                        '<span class="segment-meta">' + esc(seg.name || '') + ' &middot; ' + memberCount + ' containers</span>' +
+                    '</div>' +
+                    '<div class="segment-card-actions">' +
+                        '<button class="btn btn-sm seg-set-limit" data-seg="' + esc(seg.id) + '">Set Limit</button>' +
+                        '<button class="btn btn-sm seg-view" data-seg="' + esc(seg.id) + '">View</button>' +
+                        '<button class="btn btn-sm btn-danger seg-delete" data-seg="' + esc(seg.id) + '">Delete</button>' +
+                    '</div>' +
+                '</div>';
+        });
+        segmentsList.innerHTML = html;
+
+        segmentsList.querySelectorAll('.seg-set-limit').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                openSegmentLimitDialog(btn.dataset.seg);
+            });
+        });
+
+        segmentsList.querySelectorAll('.seg-view').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                window.open('?segment=' + encodeURIComponent(btn.dataset.seg), '_blank');
+            });
+        });
+
+        segmentsList.querySelectorAll('.seg-delete').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var segId = btn.dataset.seg;
+                if (confirm('Delete segment "' + segId + '"?')) {
+                    api('DELETE', '/segments/' + segId).then(function () {
+                        toast('Segment deleted: ' + segId);
+                        refresh();
+                    }).catch(function (err) {
+                        toast('Delete failed: ' + err.message, true);
+                    });
+                }
+            });
+        });
+    }
+
+    // Create segment
+    document.getElementById('btn-create-segment').addEventListener('click', function () {
+        document.getElementById('segment-id').value = '';
+        document.getElementById('segment-name').value = '';
+        document.getElementById('create-segment-dialog').showModal();
+    });
+
+    document.getElementById('create-segment-dialog').addEventListener('close', function () {
+        if (this.returnValue === 'cancel') return;
+        var id = document.getElementById('segment-id').value.trim();
+        var name = document.getElementById('segment-name').value.trim() || id;
+        if (!id) return;
+
+        api('POST', '/segments', { id: id, name: name }).then(function () {
+            toast('Segment created: ' + id);
+            refresh();
+        }).catch(function (err) {
+            toast('Create failed: ' + err.message, true);
+        });
+    });
+
+    // Segment limit dialog
+    function openSegmentLimitDialog(segId) {
+        document.getElementById('segment-limit-seg-id').value = segId;
+        document.getElementById('segment-limit-value').value = '';
+        document.getElementById('segment-limit-dialog').showModal();
+    }
+
+    document.getElementById('segment-limit-dialog').addEventListener('close', function () {
+        if (this.returnValue === 'cancel') return;
+        var segId = document.getElementById('segment-limit-seg-id').value;
+        var type = document.getElementById('segment-limit-type').value;
+        var operation = document.getElementById('segment-limit-operation').value;
+        var rawValue = document.getElementById('segment-limit-value').value.trim();
+        if (!rawValue) return;
+
+        var value = parseValue(type, rawValue);
+        if (isNaN(value)) {
+            toast('Invalid value: ' + rawValue, true);
+            return;
+        }
+
+        api('PUT', '/segments/' + segId + '/limits', {
+            type: type, value: value, operation: operation
+        }).then(function () {
+            toast('Segment limit ' + operation + ': ' + type);
+            refresh();
+        }).catch(function (err) {
+            toast('Segment limit failed: ' + err.message, true);
+        });
+    });
+
+    // Assign segment dialog
+    function openAssignDialog(containerID) {
+        document.getElementById('assign-container-id').value = containerID;
+        var sel = document.getElementById('assign-segment-select');
+        sel.innerHTML = '<option value="">(none)</option>';
+        segments.forEach(function (seg) {
+            sel.innerHTML += '<option value="' + esc(seg.id) + '">' + esc(seg.id) + ' - ' + esc(seg.name) + '</option>';
+        });
+        // Pre-select current segment
+        containers.forEach(function (cs) {
+            if (cs.container.id === containerID && cs.container.segment_id) {
+                sel.value = cs.container.segment_id;
+            }
+        });
+        document.getElementById('assign-segment-dialog').showModal();
+    }
+
+    document.getElementById('assign-segment-dialog').addEventListener('close', function () {
+        if (this.returnValue === 'cancel') return;
+        var containerID = document.getElementById('assign-container-id').value;
+        var segId = document.getElementById('assign-segment-select').value;
+
+        // Find current segment
+        var currentSeg = '';
+        containers.forEach(function (cs) {
+            if (cs.container.id === containerID) currentSeg = cs.container.segment_id || '';
+        });
+
+        if (segId === currentSeg) return; // No change
+
+        var promise;
+        if (currentSeg && segId) {
+            // Unassign from old, then assign to new
+            promise = api('POST', '/segments/' + currentSeg + '/containers/' + containerID + '/unassign')
+                .then(function () { return api('POST', '/segments/' + segId + '/containers/' + containerID + '/assign'); });
+        } else if (segId) {
+            promise = api('POST', '/segments/' + segId + '/containers/' + containerID + '/assign');
+        } else if (currentSeg) {
+            promise = api('POST', '/segments/' + currentSeg + '/containers/' + containerID + '/unassign');
+        } else {
+            return;
+        }
+
+        promise.then(function () {
+            toast(segId ? 'Assigned to ' + segId : 'Unassigned');
+            refresh();
+        }).catch(function (err) {
+            toast('Assign failed: ' + err.message, true);
+        });
+    });
 
     // --- Init ---
     // Set scope badge and title
