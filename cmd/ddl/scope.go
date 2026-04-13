@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 )
@@ -126,29 +125,26 @@ Examples:
 
 func scopeListenCmd() *cobra.Command {
 	var port int
-	var socket string
 	cmd := &cobra.Command{
 		Use:   "listen <segment-id>",
 		Short: "Start a scoped API listener for a segment",
-		Long: `Spawn a persistent API listener locked to a segment scope.
-The listener only serves data for containers in that segment.
+		Long: `Start a scoped API listener inside the daemon container.
+The port is exposed on the host (ports 7200-7220 are pre-mapped).
+
+Only containers in the specified segment are visible through this listener.
 
 Examples:
   ddl scope listen prod --port 7200
-  ddl scope listen prod --socket /tmp/ddl-prod.sock`,
+  ddl scope listen prod --port 7205`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			scope := "segment:" + args[0]
-			body := map[string]interface{}{"scope": scope}
-			if socket != "" {
-				body["socket"] = socket
-			} else {
-				body["listen"] = fmt.Sprintf(":%d", port)
-			}
-
-			data, _ := json.Marshal(body)
+			body, _ := json.Marshal(map[string]interface{}{
+				"scope":  scope,
+				"listen": fmt.Sprintf(":%d", port),
+			})
 			req, _ := http.NewRequest(http.MethodPost, apiURL+"/scoped-listeners",
-				bytes.NewReader(data))
+				bytes.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
 
 			resp, err := httpClient.Do(req)
@@ -166,13 +162,13 @@ Examples:
 			if jsonOutput {
 				return printJSON(result)
 			}
-			fmt.Printf("scoped listener %s started on %s (scope=%s)\n",
-				result["id"], result["listen"], result["scope"])
+			fmt.Printf("scoped listener started on http://localhost:%d (scope=%s)\n", port, scope)
+			fmt.Printf("  id: %s\n", result["id"])
+			fmt.Printf("  note: port must be in 7200-7220 range (pre-mapped on daemon start)\n")
 			return nil
 		},
 	}
-	cmd.Flags().IntVar(&port, "port", 7200, "TCP port to listen on")
-	cmd.Flags().StringVar(&socket, "socket", "", "Unix socket path (overrides --port)")
+	cmd.Flags().IntVar(&port, "port", 7200, "TCP port (must be in 7200-7220 range)")
 	return cmd
 }
 
@@ -193,17 +189,10 @@ func scopeListenersCmd() *cobra.Command {
 				fmt.Println("No scoped listeners.")
 				return nil
 			}
-			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintf(w, "ID\tSCOPE\tLISTEN\n")
 			for _, l := range listeners {
 				sl := l.(map[string]interface{})
-				listen := sl["listen"]
-				if s, ok := sl["socket"].(string); ok && s != "" {
-					listen = s
-				}
-				fmt.Fprintf(w, "%s\t%s\t%s\n", sl["id"], sl["scope"], listen)
+				fmt.Printf("  %s  %s  http://localhost%s\n", sl["id"], sl["scope"], sl["listen"])
 			}
-			w.Flush()
 			return nil
 		},
 	}
@@ -229,3 +218,4 @@ func scopeUnlistenCmd() *cobra.Command {
 		},
 	}
 }
+

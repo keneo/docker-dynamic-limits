@@ -199,6 +199,7 @@ func startDaemonContainer(port int) error {
 		"-v", "/var/run/docker.sock:/var/run/docker.sock",
 		"-v", "/var/run/ddl:/run/ddl",
 		"-p", fmt.Sprintf("%d:7123", port),
+		"-p", "7200-7220:7200-7220", // reserved for scoped listeners
 	}
 
 	// Forward env vars to daemon container
