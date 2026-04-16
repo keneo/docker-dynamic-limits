@@ -68,6 +68,10 @@ type SpendingTracker struct {
 	scopeSpendingBlocked map[model.Scope]bool
 	// containerScopes tracks which scope each container belongs to
 	containerScopes map[string]model.Scope
+	// resolveByIP resolves a container ID from a source IP address (set by API server)
+	resolveByIP func(ip string) string
+	// sharedProxyAddr is the address of the shared proxy (set once, returned by RegisterContainer)
+	sharedProxyAddr string
 }
 
 // UpstreamErrorInfo describes an error returned by an upstream API provider.
@@ -156,8 +160,24 @@ func (st *SpendingTracker) SeedSpending(totals map[string]int64) {
 
 // RegisterContainer sets up proxy tracking for a container.
 // Returns the proxy address to use as HTTP_PROXY.
+// If a shared proxy address is configured, returns that instead of creating a per-container listener.
 func (st *SpendingTracker) RegisterContainer(containerID string, budget int64, existingSpending int64) (string, error) {
-	// Start a per-container proxy listener
+	st.mu.Lock()
+	shared := st.sharedProxyAddr
+	st.spending[containerID] = existingSpending * 1_000 // milli-cents → micro-cents
+	st.budgets[containerID] = budget * 1_000            // milli-cents → micro-cents
+	st.mu.Unlock()
+
+	// Use shared proxy if configured (containers identified by source IP)
+	if shared != "" {
+		st.mu.Lock()
+		st.proxyAddrs[containerID] = shared
+		st.mu.Unlock()
+		log.Printf("[proxy] registered container %s on shared proxy %s (budget: %d milli-cents)", containerID, shared, budget)
+		return shared, nil
+	}
+
+	// Fallback: per-container proxy listener (legacy)
 	listener, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		return "", fmt.Errorf("listen: %w", err)
@@ -167,8 +187,6 @@ func (st *SpendingTracker) RegisterContainer(containerID string, budget int64, e
 	st.mu.Lock()
 	st.containerByAddr[addr] = containerID
 	st.proxyAddrs[containerID] = addr
-	st.spending[containerID] = existingSpending * 1_000 // milli-cents → micro-cents
-	st.budgets[containerID] = budget * 1_000            // milli-cents → micro-cents
 	st.mu.Unlock()
 
 	proxy := &http.Server{
@@ -176,8 +194,83 @@ func (st *SpendingTracker) RegisterContainer(containerID string, budget int64, e
 	}
 	go proxy.Serve(listener)
 
-	log.Printf("[proxy] started proxy for container %s on %s (budget: %d milli-cents)", containerID, addr, budget)
+	log.Printf("[proxy] started per-container proxy for %s on %s (budget: %d milli-cents)", containerID, addr, budget)
 	return addr, nil
+}
+
+// SetIPResolver sets the callback for resolving container ID from source IP.
+// This is used by the shared proxy to identify containers without per-container ports.
+func (st *SpendingTracker) SetIPResolver(fn func(ip string) string) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.resolveByIP = fn
+}
+
+// SetSharedProxyAddr sets the address of the shared proxy.
+// When set, RegisterContainer returns this address instead of creating per-container listeners.
+func (st *SpendingTracker) SetSharedProxyAddr(addr string) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.sharedProxyAddr = addr
+}
+
+// SharedProxyHandler returns an HTTP handler for the shared proxy endpoint.
+// Containers are identified by source IP instead of per-container listener ports.
+// Returns 407 Proxy Authentication Required if the container can't be identified.
+func (st *SpendingTracker) SharedProxyHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// CONNECT is handled separately
+		if r.Method == http.MethodConnect {
+			st.sharedHandleConnect(w, r)
+			return
+		}
+
+		// Resolve container from source IP
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if host == "" {
+			host = r.RemoteAddr
+		}
+
+		st.mu.RLock()
+		resolver := st.resolveByIP
+		st.mu.RUnlock()
+
+		containerID := ""
+		if resolver != nil {
+			containerID = resolver(host)
+		}
+		if containerID == "" {
+			http.Error(w, `{"error":"unknown container — set HTTP_PROXY to your per-container proxy or ensure container is registered"}`, http.StatusProxyAuthRequired)
+			return
+		}
+
+		// Delegate to the per-container handler
+		st.proxyHandler(containerID).ServeHTTP(w, r)
+	})
+}
+
+func (st *SpendingTracker) sharedHandleConnect(w http.ResponseWriter, r *http.Request) {
+	// Resolve container from source IP
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if host == "" {
+		host = r.RemoteAddr
+	}
+
+	st.mu.RLock()
+	resolver := st.resolveByIP
+	st.mu.RUnlock()
+
+	containerID := ""
+	if resolver != nil {
+		containerID = resolver(host)
+	}
+	if containerID == "" {
+		http.Error(w, "unknown container", http.StatusProxyAuthRequired)
+		return
+	}
+
+	// Delegate to the existing CONNECT handler
+	st.handleConnect(containerID, w, r)
 }
 
 // UpdateBudget changes the spending budget for a container (budget in milli-cents).

@@ -115,8 +115,20 @@ func main() {
 	// Initialize enforcement manager
 	em := enforcement.NewManager(st, dc, cg, px, bus)
 
-	// Restore proxy listeners for existing containers so they keep their
-	// spending tracking and proxy addresses after a daemon restart.
+	// Configure shared proxy address (containers reach proxy via daemon container name)
+	sharedProxyPort := "7180"
+	if p := os.Getenv("DDL_SHARED_PROXY_PORT"); p != "" {
+		sharedProxyPort = p
+	}
+	// Containers address the proxy via the daemon container name on the Docker network.
+	// The daemon container is named "ddl-daemon" by the CLI.
+	sharedAddr := "ddl-daemon:" + sharedProxyPort
+	if a := os.Getenv("DDL_SHARED_PROXY_ADDR"); a != "" {
+		sharedAddr = a
+	}
+	px.SetSharedProxyAddr(sharedAddr)
+
+	// Restore proxy tracking for existing containers.
 	if containers, err := st.ListContainers(); err == nil {
 		for _, c := range containers {
 			budget, _ := st.GetLimit(c.ID, model.LimitSpending)
@@ -217,6 +229,22 @@ func main() {
 	go func() {
 		if err := tcpServer.ListenAndServe(); err != http.ErrServerClosed {
 			log.Fatalf("TCP server error: %v", err)
+		}
+	}()
+
+	// Start shared proxy listener (containers identified by source IP)
+	proxyAddr := ":" + sharedProxyPort
+	px.SetIPResolver(func(ip string) string {
+		return srv.ResolveContainerByIP(ip)
+	})
+	sharedProxyServer := &http.Server{
+		Addr:    proxyAddr,
+		Handler: px.SharedProxyHandler(),
+	}
+	go func() {
+		log.Printf("shared proxy listening on %s (containers identified by source IP)", proxyAddr)
+		if err := sharedProxyServer.ListenAndServe(); err != http.ErrServerClosed {
+			log.Printf("warning: shared proxy error: %v", err)
 		}
 	}()
 

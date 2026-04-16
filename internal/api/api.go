@@ -801,6 +801,11 @@ func (s *Server) resolveContainerByIP(ip string) string {
 	return s.ipMap[ip]
 }
 
+// ResolveContainerByIP is the public version for use by the shared proxy.
+func (s *Server) ResolveContainerByIP(ip string) string {
+	return s.resolveContainerByIP(ip)
+}
+
 func extractIP(remoteAddr string) string {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
