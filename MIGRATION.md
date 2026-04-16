@@ -76,12 +76,22 @@ Consumers should migrate to `host_*` fields. The `global_*` fields will be remov
 
 New commands:
 ```
-ddl segments create/list/delete/show/assign/unassign
-ddl segments limits set/get/increase/decrease
-ddl segments usage
-ddl segments config get/set
-ddl segments freeze-all/unfreeze-all
+# Segment management
+ddl segment create/list/delete/show/assign/unassign
+
+# Segment limits, usage, freeze (explicit target)
+ddl limits set-segment/get-segment/increase-segment/decrease-segment
+ddl usage-segment <segment>
+ddl freeze-segment/unfreeze-segment <segment>
+
+# Scope-aware commands (target current scope: host or segment)
+ddl limits set-all/get-all/increase-all/decrease-all
+ddl usage-all, ddl ls, ddl freeze-all, ddl unfreeze-all
+
+# CLI scope persistence
 ddl scope set/clear/show
+
+# Scoped API listeners
 ddl scope listen/listeners/unlisten
 ```
 
@@ -107,22 +117,22 @@ No manual migration steps required.
 ### Create segments and assign containers
 
 ```bash
-ddl segments create prod --name "Production"
-ddl segments assign my-container prod
+ddl segment create prod --name "Production"
+ddl segment assign my-container prod
 ```
 
 ### Set segment limits
 
 ```bash
-ddl segments limits set prod spending 10.00
-ddl segments limits set prod cpu 24h
+ddl limits set-segment prod spending 10.00
+ddl limits set-segment prod cpu 24h
 ```
 
 ### View segment status
 
 ```bash
-ddl segments show prod
-ddl segments usage prod
+ddl segment show prod
+ddl usage-segment prod
 ```
 
 ### Scope the CLI to a segment
@@ -131,6 +141,11 @@ ddl segments usage prod
 ddl scope set prod          # persist scope
 ddl --segment prod ls       # one-off scope
 DDL_SEGMENT=prod ddl ls     # env-based scope
+
+# With scope set, -all commands target the segment:
+ddl limits set-all spending 10.00   # sets prod segment limit
+ddl usage-all                        # shows prod containers
+ddl freeze-all                       # freezes prod containers
 ```
 
 ### Scoped API listeners
@@ -149,9 +164,12 @@ ddl dashboard --segment prod   # opens dashboard for prod only
 
 ### Per-segment config
 
+Per-segment config is managed via the REST API:
+
 ```bash
-ddl segments config set prod anthropic-key sk-prod-xxx
-ddl segments config get prod
+curl -X PUT localhost:7123/segments/prod/config \
+  -H 'Content-Type: application/json' \
+  -d '{"anthropic_key": "sk-prod-xxx"}'
 ```
 
 ## Timeline

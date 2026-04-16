@@ -38,8 +38,8 @@ Key rules:
 ### Create a segment
 
 ```bash
-ddl segments create prod --name "Production"
-ddl segments create dev --name "Development"
+ddl segment create prod --name "Production"
+ddl segment create dev --name "Development"
 ```
 
 The `id` is what you use in commands. The `--name` is an optional human-readable label.
@@ -47,7 +47,7 @@ The `id` is what you use in commands. The `--name` is an optional human-readable
 ### List segments
 
 ```bash
-ddl segments list
+ddl segment list
 ```
 
 ```
@@ -59,14 +59,14 @@ dev   Development  2026-04-08T13:35:00Z
 ### Assign containers to segments
 
 ```bash
-ddl segments assign my-container prod
+ddl segment assign my-container prod
 ```
 
 A container can only be in one segment at a time. To move it:
 
 ```bash
-ddl segments unassign my-container prod
-ddl segments assign my-container dev
+ddl segment unassign my-container
+ddl segment assign my-container dev
 ```
 
 You can also assign during registration:
@@ -78,7 +78,7 @@ ddl register --segment prod my-new-container
 ### View segment status
 
 ```bash
-ddl segments show prod
+ddl segment show prod
 ```
 
 ```
@@ -95,25 +95,25 @@ Usage:
 
 ## Setting segment limits
 
-Segment limits work exactly like host limits, but scoped to the segment's containers.
+Segment limits follow the same pattern as host limits but with `-segment`:
 
 ```bash
-ddl segments limits set prod spending 10.00
-ddl segments limits set prod cpu 24h
-ddl segments limits set prod ram 4g
+ddl limits set-segment prod spending 10.00
+ddl limits set-segment prod cpu 24h
+ddl limits set-segment prod ram 4g
 ```
 
 To increase or decrease:
 
 ```bash
-ddl segments limits increase prod spending 5.00
-ddl segments limits decrease prod cpu 2h
+ddl limits increase-segment prod spending 5.00
+ddl limits decrease-segment prod cpu 2h
 ```
 
 View current limits:
 
 ```bash
-ddl segments limits get prod
+ddl limits get-segment prod
 ```
 
 ### How segment limits interact with host limits
@@ -140,7 +140,7 @@ Container-a will be blocked if:
 ### View aggregated usage
 
 ```bash
-ddl segments usage prod
+ddl usage-segment prod
 ```
 
 ```
@@ -159,11 +159,13 @@ Instead of typing `--segment prod` on every command, you can set a persistent sc
 ddl scope set prod
 ```
 
-Now all commands automatically operate within the "prod" segment:
+Now `-all` commands automatically operate within the "prod" segment:
 
 ```bash
 ddl ls              # only shows prod containers
 ddl usage-all       # only prod container usage
+ddl limits get-all  # shows prod segment limits
+ddl limits set-all spending 10.00  # sets prod segment limit
 ddl freeze-all      # only freezes prod containers
 ```
 
@@ -199,6 +201,19 @@ So even with a persisted scope, you can override for one command:
 ddl --segment dev ls     # see dev containers, regardless of persisted scope
 ```
 
+### Command pattern
+
+Every operation has three targeting modes:
+
+| Target | Limits | Usage | Freeze |
+|---|---|---|---|
+| Container | `limits set <c>` | `usage <c>` | `freeze <c>` |
+| Current scope | `limits set-all` | `usage-all` | `freeze-all` |
+| Host (explicit) | `limits set-host` | `usage-host` | -- |
+| Segment (explicit) | `limits set-segment <s>` | `usage-segment <s>` | `freeze-segment <s>` |
+
+The `-all` commands target whatever the current scope is: host when no scope is set, or the active segment.
+
 ## Segment-scoped dashboard
 
 ### From the main dashboard
@@ -229,32 +244,41 @@ A scoped dashboard:
 
 Segments can override host-level configuration. This lets you use different API keys, enable/disable providers, or set different webhooks per segment.
 
-```bash
-ddl segments config set prod anthropic-key sk-prod-xxx
-ddl segments config set dev openai-enabled false
-```
-
-View effective configuration (host defaults + segment overrides):
+Segment config is managed via the REST API:
 
 ```bash
-ddl segments config get prod
+# Set a config override for a segment
+curl -X PUT http://localhost:7123/segments/prod/config \
+  -H 'Content-Type: application/json' \
+  -d '{"anthropic_key": "sk-prod-xxx"}'
+
+# View effective config (host defaults + segment overrides)
+curl http://localhost:7123/segments/prod/config
 ```
 
-Overridden keys are marked. Keys not overridden fall through to the host config.
+Overridden keys are marked with `_segment_overrides` in the response. Keys not overridden fall through to the host config.
 
 Supported config keys:
-- `anthropic-enabled`, `openai-enabled`, `ollama-enabled` -- toggle providers
-- `anthropic-key`, `openai-key` -- API key overrides
-- `ollama-models` -- restrict available models
-- `error-webhooks` -- segment-specific error notification URLs
+- `anthropic_enabled`, `openai_enabled`, `ollama_enabled` -- toggle providers
+- `anthropic_key`, `openai_key` -- API key overrides
+- `ollama_models` -- restrict available models
+- `error_webhooks` -- segment-specific error notification URLs
 
 ## Segment-scoped freeze/unfreeze
 
-Freeze or unfreeze all containers in a segment at once:
+Freeze or unfreeze all containers in a segment:
 
 ```bash
-ddl segments freeze-all prod
-ddl segments unfreeze-all prod
+ddl freeze-segment prod
+ddl unfreeze-segment prod
+```
+
+Or use scope:
+
+```bash
+ddl scope set prod
+ddl freeze-all       # freezes only prod containers
+ddl unfreeze-all     # unfreezes only prod containers
 ```
 
 This is useful for maintenance or when you need to pause a whole project's containers without affecting others.
@@ -267,7 +291,7 @@ For advanced isolation, you can spawn a separate API listener locked to a segmen
 ddl scope listen prod --port 7200
 ```
 
-This creates a persistent API endpoint that only serves data for the "prod" segment. Requests to other segments or host-level data are not accessible through this listener.
+This creates a persistent API endpoint on the daemon container (ports 7200-7220 are pre-mapped) that only serves data for the "prod" segment. Accessible at `http://localhost:7200`.
 
 List active listeners:
 
@@ -275,15 +299,10 @@ List active listeners:
 ddl scope listeners
 ```
 
-```
-ID                      SCOPE         LISTEN
-sl-1775655765953770466  segment:prod  [::]:7200
-```
-
 Stop a listener:
 
 ```bash
-ddl scope unlisten sl-1775655765953770466
+ddl scope unlisten <id>
 ```
 
 ## Events
@@ -324,8 +343,8 @@ When a container is removed from a segment (or from the system entirely), its cu
 A segment can only be deleted if it has no containers assigned:
 
 ```bash
-ddl segments unassign my-container prod
-ddl segments delete prod
+ddl segment unassign my-container
+ddl segment delete prod
 ```
 
 Deleting a segment also removes its limits and accumulated usage data.
@@ -334,31 +353,37 @@ Deleting a segment also removes its limits and accumulated usage data.
 
 ```bash
 # Segment management
-ddl segments create <id> [--name <name>]
-ddl segments list
-ddl segments show <id>
-ddl segments delete <id>
+ddl segment create <id> [--name <name>]
+ddl segment list
+ddl segment show <id>
+ddl segment delete <id>
 
 # Container assignment
-ddl segments assign <container> <segment>
-ddl segments unassign <container> <segment>
+ddl segment assign <container> [<segment>]   # segment optional if scope set
+ddl segment unassign <container>
 
-# Segment limits
-ddl segments limits set <segment> <type> <value>
-ddl segments limits get <segment>
-ddl segments limits increase <segment> <type> <value>
-ddl segments limits decrease <segment> <type> <value>
+# Segment limits (explicit)
+ddl limits set-segment <segment> <type> <value>
+ddl limits get-segment <segment>
+ddl limits increase-segment <segment> <type> <value>
+ddl limits decrease-segment <segment> <type> <value>
 
-# Segment usage
-ddl segments usage <segment>
+# Segment usage (explicit)
+ddl usage-segment <segment>
 
-# Segment-wide actions
-ddl segments freeze-all <segment>
-ddl segments unfreeze-all <segment>
+# Segment freeze (explicit)
+ddl freeze-segment <segment>
+ddl unfreeze-segment <segment>
 
-# Segment config
-ddl segments config get <segment>
-ddl segments config set <segment> <key> <value>
+# Scope-aware commands (target current scope: host or segment)
+ddl limits set-all <type> <value>
+ddl limits get-all
+ddl limits increase-all <type> <value>
+ddl limits decrease-all <type> <value>
+ddl usage-all
+ddl freeze-all
+ddl unfreeze-all
+ddl ls
 
 # CLI scope
 ddl scope                              # show current scope

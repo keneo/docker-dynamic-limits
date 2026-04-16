@@ -22,12 +22,13 @@ Dynamic resource limit management for Docker containers. Set, monitor, and enfor
 | **Disk request B·s** | Byte-seconds (ddl disk limit × time) | Container kill |
 
 - **Per-container limits** — set, increase, or decrease any limit at any time
-- **Global limits** — shared budgets across all containers (sum of usage vs global limit)
-- **Automatic enforcement** — daemon polls every second and applies/releases enforcement actions
+- **Host limits** — shared budgets across all containers (sum of usage vs host limit)
+- **Segments** — group containers with shared segment-level limits and config (see [SEGMENTS.md](SEGMENTS.md))
+- **Automatic enforcement** — daemon polls every second and applies/releases enforcement actions at container, segment, and host levels
 - **Spending tracking** — transparent HTTP proxy intercepts OpenAI and Anthropic API calls, extracts token usage from responses, and calculates costs using built-in model pricing
 - **Container cloning** — clone a running container with all its limits copied over
 - **In-container self-query** — containers can check their own limits and usage via REST API or `ddl-guest` binary
-- **Web dashboard** — real-time browser UI for monitoring and managing containers
+- **Web dashboard** — real-time browser UI for monitoring and managing containers and segments
 
 ## Architecture
 
@@ -154,21 +155,21 @@ ddl limits increase <container> cpu 30m
 ddl limits decrease <container> ram 128m
 ```
 
-### Global limits
+### Host limits
 
-Global limits apply a shared budget across **all** containers. When the sum of all container usage exceeds a global limit, enforcement is applied to every container. For spending limits, global enforcement also blocks all tracked API calls through the proxy with HTTP 429 `"global spending limit exceeded"` — this is the global spending kill-switch.
+Host limits apply a shared budget across **all** containers on the machine. When the sum of all container usage exceeds a host limit, enforcement is applied to every container. For spending limits, host enforcement also blocks all tracked API calls through the proxy with HTTP 429 — this is the spending kill-switch. (The old `*-global` commands still work as hidden aliases.)
 
 **Usage accumulation**: When a container is removed, its cumulative usage (spending, cpu, net, disk-io-bytes, disk-io-ops, and all byte-second types) is preserved in the global total. Only `ram` and `disk` (current-state metrics) are subtracted when a container is removed. This prevents removing a container from reducing global totals for irreversible resources like money spent or CPU time consumed.
 
-**Keep-limits-consistent mode**: When enabled (`ddl config set keep-limits-consistent true`), the API validates that per-container limits stay within global limits. On per-container `increase` that would exceed the global limit → HTTP 400. On per-container `set` that would exceed → auto-capped to fit, HTTP 209. On global `decrease`/`set` below sum of per-container limits → HTTP 400. Cannot be enabled when current limits are already inconsistent.
+**Keep-limits-consistent mode**: When enabled (`ddl config set keep-limits-consistent true`), the API validates that per-container limits stay within host limits. On per-container `increase` that would exceed the host limit → HTTP 400. On per-container `set` that would exceed → auto-capped to fit, HTTP 209. On host `decrease`/`set` below sum of per-container limits → HTTP 400. Cannot be enabled when current limits are already inconsistent.
 
 ```bash
-ddl limits set-global cpu 24h           # 24 hours of CPU across all containers
-ddl limits set-global spending 100.00   # $100 total spending budget
+ddl limits set-host cpu 24h           # 24 hours of CPU across all containers
+ddl limits set-host spending 100.00   # $100 total spending budget
 ddl limits increase-global cpu 12h
 ddl limits decrease-global spending 10.00
-ddl limits get-global                   # show all global limits with usage
-ddl usage-global                        # aggregated usage vs global limits
+ddl limits get-host                     # show all host limits
+ddl usage-host                          # aggregated usage vs host limits
 ```
 
 ### Monitor
@@ -176,9 +177,9 @@ ddl usage-global                        # aggregated usage vs global limits
 ```bash
 ddl usage <container>    # usage vs limits with percentages
 ddl usage-all            # usage for all containers at once
-ddl usage-global         # global usage totals vs global limits
+ddl usage-host           # host usage totals vs host limits
 ddl limits get <container>
-ddl limits get-global    # global limits overview
+ddl limits get-host      # host limits overview
 ddl ls                   # list all managed containers
 ```
 
