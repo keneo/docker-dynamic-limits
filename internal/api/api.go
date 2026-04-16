@@ -159,6 +159,7 @@ func (s *Server) ReadOnlyHandler() http.Handler {
 	mux.HandleFunc("/ollama/queue", s.handleOllamaQueue)
 	mux.HandleFunc("/ollama/models", s.handleOllamaModels)
 	mux.HandleFunc("/ollama/bid", s.handleOllamaBidByIP)
+	mux.HandleFunc("/docs", s.handleDocs)
 	return mux
 }
 
