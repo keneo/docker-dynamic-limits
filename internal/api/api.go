@@ -137,6 +137,8 @@ func (s *Server) registerRoutes() {
 	// Scoped listeners management
 	s.mux.HandleFunc("/scoped-listeners", s.handleScopedListeners)
 	s.mux.HandleFunc("/scoped-listeners/", s.handleScopedListenerByID)
+	// API documentation
+	s.mux.HandleFunc("/docs", s.handleDocs)
 }
 
 // Handler returns the HTTP handler (full API).
@@ -185,8 +187,10 @@ func (s *Server) handleGlobalLimits(w http.ResponseWriter, r *http.Request) {
 			Value     int64  `json:"value"`
 			Operation string `json:"operation"` // "set", "increase", "decrease"
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, err)
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid request: %w", err))
 			return
 		}
 
@@ -327,8 +331,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		ContainerID string `json:"container_id"`
 		SegmentID   string `json:"segment_id,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid request: %w", err))
 		return
 	}
 	if req.ContainerID == "" {
@@ -512,8 +518,10 @@ func (s *Server) handleLimits(w http.ResponseWriter, r *http.Request, containerI
 			Value     int64  `json:"value"`
 			Operation string `json:"operation"` // "set", "increase", "decrease"
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, err)
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid request: %w", err))
 			return
 		}
 
@@ -1451,8 +1459,10 @@ func (s *Server) handleSegments(w http.ResponseWriter, r *http.Request) {
 			ID   string `json:"id"`
 			Name string `json:"name"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid JSON: %w", err))
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid request: %w", err))
 			return
 		}
 		if req.ID == "" {
@@ -1661,8 +1671,10 @@ func (s *Server) handleSegmentLimits(w http.ResponseWriter, r *http.Request, seg
 			Value     int64  `json:"value"`
 			Operation string `json:"operation"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid JSON: %w", err))
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid request: %w", err))
 			return
 		}
 
@@ -2073,6 +2085,25 @@ func (s *Server) ScopedHandler(scope model.Scope) http.Handler {
 		}
 	})
 
+	// /global-limits points to scope limits on scoped listeners (backward compat)
+	// /host-limits is NOT available on scoped listeners — use /limits or /global-limits
+	scopeLimitsHandler := func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			limits, _ := s.store.GetAllScopeLimits(scope)
+			writeJSON(w, limits)
+		case http.MethodPut:
+			if scope.IsSegment() {
+				s.handleSegmentLimits(w, r, scope.SegmentID())
+			} else {
+				s.handleGlobalLimits(w, r)
+			}
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}
+	mux.HandleFunc("/global-limits", scopeLimitsHandler)
+
 	// Events (unscoped — events carry container_id, client can filter)
 	mux.HandleFunc("/events", s.handleEvents)
 
@@ -2101,8 +2132,10 @@ func (s *Server) handleScopedListeners(w http.ResponseWriter, r *http.Request) {
 			Listen string `json:"listen"`
 			Socket string `json:"socket"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, err)
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid request: %w", err))
 			return
 		}
 		if req.Listen == "" && req.Socket == "" {
@@ -2287,6 +2320,160 @@ func (s *Server) handleUnfreezeAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"results": results})
 }
 
+// --- API Documentation ---
+
+func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	type endpoint struct {
+		Method      string      `json:"method"`
+		Path        string      `json:"path"`
+		Description string      `json:"description"`
+		Request     interface{} `json:"request,omitempty"`
+	}
+	type section struct {
+		Title       string     `json:"title"`
+		Description string     `json:"description,omitempty"`
+		Endpoints   []endpoint `json:"endpoints"`
+	}
+
+	docs := map[string]interface{}{
+		"title":   "Docker Dynamic Limits API",
+		"version": "1.0",
+		"sections": []section{
+			{
+				Title: "Containers",
+				Endpoints: []endpoint{
+					{Method: "GET", Path: "/containers", Description: "List all containers with status, limits, usage, and global/host aggregates"},
+					{Method: "GET", Path: "/containers/{id}", Description: "Get container detail including limits, usage, enforced state, proxy activity"},
+					{Method: "DELETE", Path: "/containers/{id}", Description: "Remove a container from tracking"},
+					{Method: "GET", Path: "/containers/{id}/limits", Description: "Get all limits for a container"},
+					{Method: "PUT", Path: "/containers/{id}/limits", Description: "Set, increase, or decrease a limit for a container",
+						Request: map[string]string{"type": "string (limit type)", "value": "int64", "operation": "string (set|increase|decrease, default: set)"}},
+					{Method: "GET", Path: "/containers/{id}/usage", Description: "Get all usage for a container"},
+					{Method: "POST", Path: "/containers/{id}/clone", Description: "Clone a container with its limits",
+						Request: map[string]string{"name": "string (optional new name)"}},
+					{Method: "GET", Path: "/containers/{id}/activity", Description: "Get recent proxy activity for a container"},
+					{Method: "POST", Path: "/containers/{id}/freeze", Description: "Freeze a container (pause + suspend byte-second accumulators)"},
+					{Method: "POST", Path: "/containers/{id}/unfreeze", Description: "Unfreeze a container"},
+				},
+			},
+			{
+				Title: "Registration",
+				Endpoints: []endpoint{
+					{Method: "POST", Path: "/register", Description: "Register a Docker container for tracking",
+						Request: map[string]string{"container_id": "string (required)", "segment_id": "string (optional)"}},
+				},
+			},
+			{
+				Title:       "Host Limits",
+				Description: "Global/host-level shared budget limits. Sum of all container usage is checked against these limits.",
+				Endpoints: []endpoint{
+					{Method: "GET", Path: "/host-limits", Description: "Get all host-level limits"},
+					{Method: "PUT", Path: "/host-limits", Description: "Set, increase, or decrease a host-level limit",
+						Request: map[string]string{"type": "string (limit type)", "value": "int64", "operation": "string (set|increase|decrease, default: set)"}},
+					{Method: "GET", Path: "/global-limits", Description: "Alias for GET /host-limits"},
+					{Method: "PUT", Path: "/global-limits", Description: "Alias for PUT /host-limits"},
+				},
+			},
+			{
+				Title:       "Segments",
+				Description: "Segment management for grouping containers with shared limits and config",
+				Endpoints: []endpoint{
+					{Method: "GET", Path: "/segments", Description: "List all segments"},
+					{Method: "POST", Path: "/segments", Description: "Create a new segment",
+						Request: map[string]string{"id": "string (required)", "name": "string (optional, defaults to id)"}},
+					{Method: "GET", Path: "/segments/{id}", Description: "Get segment detail with limits, usage, enforced state, container count"},
+					{Method: "DELETE", Path: "/segments/{id}", Description: "Delete a segment (fails if containers are still assigned)"},
+					{Method: "GET", Path: "/segments/{id}/limits", Description: "Get all limits for a segment"},
+					{Method: "PUT", Path: "/segments/{id}/limits", Description: "Set, increase, or decrease a segment limit",
+						Request: map[string]string{"type": "string (limit type)", "value": "int64", "operation": "string (set|increase|decrease, default: set)"}},
+					{Method: "GET", Path: "/segments/{id}/usage", Description: "Get aggregated usage across all containers in the segment"},
+					{Method: "GET", Path: "/segments/{id}/containers", Description: "List containers in a segment with limits, usage, and segment aggregates"},
+					{Method: "POST", Path: "/segments/{id}/containers/{cid}/assign", Description: "Assign a container to this segment"},
+					{Method: "POST", Path: "/segments/{id}/containers/{cid}/unassign", Description: "Unassign a container from this segment"},
+					{Method: "GET", Path: "/segments/{id}/containers/{cid}", Description: "Get container detail (container must belong to segment)"},
+					{Method: "GET", Path: "/segments/{id}/containers/{cid}/limits", Description: "Get container limits (container must belong to segment)"},
+					{Method: "PUT", Path: "/segments/{id}/containers/{cid}/limits", Description: "Set container limits (container must belong to segment)"},
+					{Method: "GET", Path: "/segments/{id}/containers/{cid}/usage", Description: "Get container usage (container must belong to segment)"},
+					{Method: "POST", Path: "/segments/{id}/containers/{cid}/clone", Description: "Clone container (container must belong to segment)"},
+					{Method: "GET", Path: "/segments/{id}/containers/{cid}/activity", Description: "Get container proxy activity (container must belong to segment)"},
+					{Method: "POST", Path: "/segments/{id}/containers/{cid}/freeze", Description: "Freeze container (container must belong to segment)"},
+					{Method: "POST", Path: "/segments/{id}/containers/{cid}/unfreeze", Description: "Unfreeze container (container must belong to segment)"},
+					{Method: "POST", Path: "/segments/{id}/freeze-all", Description: "Freeze all containers in this segment"},
+					{Method: "POST", Path: "/segments/{id}/unfreeze-all", Description: "Unfreeze all containers in this segment"},
+					{Method: "GET", Path: "/segments/{id}/config", Description: "Get effective config for a segment (host defaults + segment overrides)"},
+					{Method: "PUT", Path: "/segments/{id}/config", Description: "Set segment config overrides"},
+				},
+			},
+			{
+				Title:       "Scoped Listeners",
+				Description: "Create additional HTTP listeners scoped to a segment or host, providing filtered views",
+				Endpoints: []endpoint{
+					{Method: "GET", Path: "/scoped-listeners", Description: "List all active scoped listeners"},
+					{Method: "POST", Path: "/scoped-listeners", Description: "Create a new scoped listener",
+						Request: map[string]string{"scope": "string (e.g. 'host' or 'segment:myid')", "listen": "string (TCP address, e.g. ':9090')", "socket": "string (Unix socket path, alternative to listen)"}},
+					{Method: "DELETE", Path: "/scoped-listeners/{id}", Description: "Stop and remove a scoped listener"},
+				},
+			},
+			{
+				Title:       "Configuration",
+				Description: "Runtime daemon configuration. Changes are persisted to config.json.",
+				Endpoints: []endpoint{
+					{Method: "GET", Path: "/config", Description: "Get current configuration (API keys are masked)"},
+					{Method: "PUT", Path: "/config", Description: "Update configuration (partial updates supported)"},
+				},
+			},
+			{
+				Title: "Events",
+				Endpoints: []endpoint{
+					{Method: "GET", Path: "/events", Description: "WebSocket endpoint for real-time event streaming"},
+				},
+			},
+			{
+				Title: "Freeze / Unfreeze",
+				Endpoints: []endpoint{
+					{Method: "POST", Path: "/freeze-all", Description: "Freeze all containers"},
+					{Method: "POST", Path: "/unfreeze-all", Description: "Unfreeze all containers"},
+				},
+			},
+			{
+				Title:       "Self-Query",
+				Description: "Container self-query endpoints. Container identifies itself via source IP or query parameter.",
+				Endpoints: []endpoint{
+					{Method: "GET", Path: "/usage", Description: "Get own usage and limits (identified by IP, ?id=, or X-Container-ID header)"},
+					{Method: "GET", Path: "/limits", Description: "Get own limits (identified by IP, ?id=, or X-Container-ID header)"},
+				},
+			},
+			{
+				Title:       "Ollama",
+				Description: "Ollama queue management for shared GPU inference",
+				Endpoints: []endpoint{
+					{Method: "GET", Path: "/ollama/queue", Description: "Get current Ollama queue status"},
+					{Method: "GET", Path: "/ollama/models", Description: "Get list of allowed Ollama models"},
+					{Method: "GET", Path: "/ollama/bid", Description: "Get current bid for a container (container identified by source IP)"},
+					{Method: "PUT", Path: "/ollama/bid", Description: "Set bid for a container (container identified by source IP)"},
+					{Method: "GET", Path: "/containers/{id}/ollama/bid", Description: "Get Ollama bid for a specific container"},
+					{Method: "PUT", Path: "/containers/{id}/ollama/bid", Description: "Set Ollama bid for a specific container"},
+					{Method: "DELETE", Path: "/containers/{id}/ollama/queue", Description: "Cancel pending Ollama request for a container"},
+				},
+			},
+			{
+				Title: "Providers",
+				Endpoints: []endpoint{
+					{Method: "GET", Path: "/providers", Description: "Get provider enabled states and Ollama availability"},
+					{Method: "PUT", Path: "/providers", Description: "Enable or disable provider hosts"},
+				},
+			},
+		},
+	}
+
+	writeJSON(w, docs)
+}
+
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
@@ -2302,4 +2489,18 @@ func writeJSON400(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadRequest)
 	json.NewEncoder(w).Encode(v)
+}
+
+// validateJSONKeys returns an error if the map contains keys not in the allowed set.
+func validateJSONKeys(data map[string]interface{}, allowed ...string) error {
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, k := range allowed {
+		allowedSet[k] = true
+	}
+	for k := range data {
+		if !allowedSet[k] {
+			return fmt.Errorf("unrecognized parameter: %q", k)
+		}
+	}
+	return nil
 }
