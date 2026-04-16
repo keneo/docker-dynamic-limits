@@ -1,6 +1,6 @@
 PREFIX ?= /usr/local/bin
 
-.PHONY: build install uninstall clean test
+.PHONY: build install uninstall clean test test-e2e
 
 build:
 	go build -o ddl ./cmd/ddl
@@ -21,3 +21,7 @@ clean:
 
 test:
 	go test ./...
+
+test-e2e:
+	docker build -t ddl-e2e -f e2e/Dockerfile .
+	docker run --rm --privileged ddl-e2e
