@@ -134,8 +134,12 @@ Environment variables:
 	root.AddCommand(daemonCmd())
 	root.AddCommand(logsCmd())
 	root.AddCommand(hooksCmd())
-	root.AddCommand(segmentsCmd())
+	root.AddCommand(segmentCmd())
+	root.AddCommand(segmentsCmd()) // hidden alias
 	root.AddCommand(scopeCmd())
+	root.AddCommand(usageSegmentCmd())
+	root.AddCommand(freezeSegmentCmd())
+	root.AddCommand(unfreezeSegmentCmd())
 	root.AddCommand(freezeCmd())
 	root.AddCommand(unfreezeCmd())
 	root.AddCommand(freezeAllCmd())
@@ -373,6 +377,99 @@ Examples:
 	limits.AddCommand(increaseHostCmd, increaseGlobalAlias)
 	limits.AddCommand(decreaseHostCmd, decreaseGlobalAlias)
 	limits.AddCommand(getHostCmd, getGlobalAlias)
+
+	// Segment limit commands (explicit segment)
+	limits.AddCommand(&cobra.Command{
+		Use:   "set-segment <segment> <type> <value>",
+		Short: "Set a segment limit",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return setSegmentLimit(args[0], args[1], args[2], "set")
+		},
+	})
+	limits.AddCommand(&cobra.Command{
+		Use:   "get-segment <segment>",
+		Short: "Show segment limits",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiGet("/segments/" + args[0] + "/limits")
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return printJSON(resp)
+			}
+			printLimitsOrUsage(resp, "Segment Limit")
+			return nil
+		},
+	})
+	limits.AddCommand(&cobra.Command{
+		Use:   "increase-segment <segment> <type> <value>",
+		Short: "Increase a segment limit",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return setSegmentLimit(args[0], args[1], args[2], "increase")
+		},
+	})
+	limits.AddCommand(&cobra.Command{
+		Use:   "decrease-segment <segment> <type> <value>",
+		Short: "Decrease a segment limit",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return setSegmentLimit(args[0], args[1], args[2], "decrease")
+		},
+	})
+
+	// Scope-aware limit commands (-all = current scope)
+	limits.AddCommand(&cobra.Command{
+		Use:   "set-all <type> <value>",
+		Short: "Set a limit for the current scope (host or segment)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return setScopeLimit(args[0], args[1], "set")
+		},
+	})
+	limits.AddCommand(&cobra.Command{
+		Use:   "get-all",
+		Short: "Show limits for the current scope (host or segment)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var path string
+			if segmentScope != "" {
+				path = "/segments/" + segmentScope + "/limits"
+			} else {
+				path = "/host-limits"
+			}
+			resp, err := apiGet(path)
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return printJSON(resp)
+			}
+			label := "Host Limit"
+			if segmentScope != "" {
+				label = "Segment Limit"
+			}
+			printLimitsOrUsage(resp, label)
+			return nil
+		},
+	})
+	limits.AddCommand(&cobra.Command{
+		Use:   "increase-all <type> <value>",
+		Short: "Increase a limit for the current scope",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return setScopeLimit(args[0], args[1], "increase")
+		},
+	})
+	limits.AddCommand(&cobra.Command{
+		Use:   "decrease-all <type> <value>",
+		Short: "Decrease a limit for the current scope",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return setScopeLimit(args[0], args[1], "decrease")
+		},
+	})
 
 	return limits
 }
@@ -693,7 +790,11 @@ its byte-second accumulators are suspended.
 Examples:
   ddl freeze-all`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := apiPost("/freeze-all", nil)
+			path := "/freeze-all"
+			if segmentScope != "" {
+				path = "/segments/" + segmentScope + "/freeze-all"
+			}
+			resp, err := apiPost(path, nil)
 			if err != nil {
 				return err
 			}
@@ -726,7 +827,11 @@ Containers that are still enforcement-paused remain Docker-paused.
 Examples:
   ddl unfreeze-all`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := apiPost("/unfreeze-all", nil)
+			path := "/unfreeze-all"
+			if segmentScope != "" {
+				path = "/segments/" + segmentScope + "/unfreeze-all"
+			}
+			resp, err := apiPost(path, nil)
 			if err != nil {
 				return err
 			}
@@ -855,6 +960,70 @@ func setGlobalLimit(limitType, valueStr, operation string) error {
 	return nil
 }
 
+// setScopeLimit sets a limit on the current scope (host or segment).
+func setScopeLimit(limitType, valueStr, operation string) error {
+	if segmentScope != "" {
+		return setSegmentLimit(segmentScope, limitType, valueStr, operation)
+	}
+	return setGlobalLimit(limitType, valueStr, operation)
+}
+
+// setSegmentLimit sets a limit on a named segment.
+func setSegmentLimit(segID, limitType, valueStr, operation string) error {
+	value, err := parseValue(limitType, valueStr)
+	if err != nil {
+		return fmt.Errorf("invalid value %q for %s: %w", valueStr, limitType, err)
+	}
+
+	data, _ := json.Marshal(map[string]interface{}{
+		"type":      limitType,
+		"value":     value,
+		"operation": operation,
+	})
+
+	req, _ := http.NewRequest(http.MethodPut,
+		apiURL+"/segments/"+segID+"/limits", bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return wrapConnErr(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return readAPIError(resp)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if jsonOutput {
+		return printJSON(result)
+	}
+
+	newVal := int64(result["value"].(float64))
+	verb := operation
+	switch operation {
+	case "set":
+		verb = "set"
+	case "increase":
+		verb = "increased"
+	case "decrease":
+		verb = "decreased"
+	}
+	fmt.Printf("segment %s %s limit %s to %s\n", segID, limitType, verb, formatValue(limitType, newVal))
+	return nil
+}
+
+// scopeLabel returns a human-readable label for the current scope.
+func scopeLabel() string {
+	if segmentScope != "" {
+		return "segment " + segmentScope
+	}
+	return "host"
+}
+
 func usageHostCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "usage-host",
@@ -911,6 +1080,85 @@ func usageHostRunE(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func usageSegmentCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "usage-segment <segment>",
+		Short: "Show aggregated usage for a segment",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiGet("/segments/" + args[0] + "/usage")
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return printJSON(resp)
+			}
+
+			usage, _ := resp["usage"].(map[string]interface{})
+			limits, _ := resp["limits"].(map[string]interface{})
+
+			types := []string{"cpu", "ram", "net", "disk", "disk-io-bytes", "disk-io-ops", "spending",
+				"ram-usage-bsec", "disk-usage-bsec", "ram-request-bsec", "disk-request-bsec"}
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintf(w, "TYPE\tUSAGE\tSEGMENT LIMIT\tSTATUS\n")
+			for _, t := range types {
+				u := getJSONFloat(usage, t)
+				l := getJSONFloat(limits, t)
+				status := "-"
+				if l > 0 {
+					pct := u / l * 100
+					status = fmt.Sprintf("%.1f%%", pct)
+					if u >= l {
+						status += " ENFORCED"
+					}
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t, formatValue(t, int64(u)), formatValue(t, int64(l)), status)
+			}
+			w.Flush()
+			return nil
+		},
+	}
+}
+
+func freezeSegmentCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "freeze-segment <segment>",
+		Short: "Freeze all containers in a segment",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiPost("/segments/"+args[0]+"/freeze-all", nil)
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return printJSON(resp)
+			}
+			fmt.Printf("frozen %v containers in segment %q\n", resp["count"], args[0])
+			return nil
+		},
+	}
+}
+
+func unfreezeSegmentCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unfreeze-segment <segment>",
+		Short: "Unfreeze all containers in a segment",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiPost("/segments/"+args[0]+"/unfreeze-all", nil)
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return printJSON(resp)
+			}
+			fmt.Printf("unfrozen %v containers in segment %q\n", resp["count"], args[0])
+			return nil
+		},
+	}
+}
+
 func apiGet(path string) (map[string]interface{}, error) {
 	resp, err := httpClient.Get(apiURL + path)
 	if err != nil {
@@ -964,7 +1212,11 @@ type containersResponse struct {
 }
 
 func fetchContainersResponse() (*containersResponse, error) {
-	resp, err := httpClient.Get(apiURL + "/containers")
+	path := "/containers"
+	if segmentScope != "" {
+		path = "/segments/" + segmentScope + "/containers"
+	}
+	resp, err := httpClient.Get(apiURL + path)
 	if err != nil {
 		return nil, wrapConnErr(err)
 	}
