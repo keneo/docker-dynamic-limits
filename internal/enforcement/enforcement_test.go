@@ -630,3 +630,183 @@ func TestEnforcementEmitsEnforcementChange(t *testing.T) {
 		t.Fatal("timed out waiting for enforcement_change event")
 	}
 }
+
+func TestSegmentEnforcementPausesCPU(t *testing.T) {
+	m, ms, md, mc, _, _ := newTestManager()
+
+	dockerID1 := "aaaaaaaaaaaa000001"
+	dockerID2 := "bbbbbbbbbbbb000002"
+	containerID1 := dockerID1[:12]
+	containerID2 := dockerID2[:12]
+
+	md.AddContainer(dockerID1, "c1", true)
+	md.AddContainer(dockerID2, "c2", true)
+	ms.RegisterContainer(dockerID1, "c1")
+	ms.RegisterContainer(dockerID2, "c2")
+
+	// Assign both containers to segment "prod"
+	segID := "prod"
+	ms.CreateSegment(segID, "Production")
+	ms.SetContainerSegment(containerID1, &segID)
+	ms.SetContainerSegment(containerID2, &segID)
+
+	cgPath1 := "/cgroup/c1"
+	cgPath2 := "/cgroup/c2"
+	mc.CgroupPaths[dockerID1] = cgPath1
+	mc.CgroupPaths[dockerID2] = cgPath2
+
+	// Set usage (total = 110, exceeds segment limit of 100)
+	ms.SetUsage(containerID1, model.LimitCPU, 60)
+	ms.SetUsage(containerID2, model.LimitCPU, 50)
+
+	// Set segment CPU limit
+	ms.SetScopeLimit(model.SegmentScope("prod"), model.LimitCPU, 100)
+
+	m.checkScopeEnforcement(nil, model.SegmentScope("prod"))
+
+	// Both containers should be paused
+	paused1, _ := md.IsContainerPaused(nil, dockerID1)
+	paused2, _ := md.IsContainerPaused(nil, dockerID2)
+	if !paused1 {
+		t.Error("container c1 should be paused when segment CPU limit exceeded")
+	}
+	if !paused2 {
+		t.Error("container c2 should be paused when segment CPU limit exceeded")
+	}
+
+	if !m.IsScopeEnforced(model.SegmentScope("prod"), model.LimitCPU) {
+		t.Error("segment CPU should be marked as enforced")
+	}
+}
+
+func TestSegmentEnforcementRelease(t *testing.T) {
+	m, ms, md, mc, _, _ := newTestManager()
+
+	dockerID1 := "aaaaaaaaaaaa000001"
+	dockerID2 := "bbbbbbbbbbbb000002"
+	containerID1 := dockerID1[:12]
+	containerID2 := dockerID2[:12]
+
+	md.AddContainer(dockerID1, "c1", true)
+	md.AddContainer(dockerID2, "c2", true)
+	ms.RegisterContainer(dockerID1, "c1")
+	ms.RegisterContainer(dockerID2, "c2")
+
+	// Assign both containers to segment "prod"
+	segID := "prod"
+	ms.CreateSegment(segID, "Production")
+	ms.SetContainerSegment(containerID1, &segID)
+	ms.SetContainerSegment(containerID2, &segID)
+
+	cgPath1 := "/cgroup/c1"
+	cgPath2 := "/cgroup/c2"
+	mc.CgroupPaths[dockerID1] = cgPath1
+	mc.CgroupPaths[dockerID2] = cgPath2
+
+	// Set usage (total = 110, exceeds segment limit of 100)
+	ms.SetUsage(containerID1, model.LimitCPU, 60)
+	ms.SetUsage(containerID2, model.LimitCPU, 50)
+
+	// Set segment CPU limit and enforce
+	ms.SetScopeLimit(model.SegmentScope("prod"), model.LimitCPU, 100)
+	m.checkScopeEnforcement(nil, model.SegmentScope("prod"))
+
+	// Verify both paused
+	paused1, _ := md.IsContainerPaused(nil, dockerID1)
+	paused2, _ := md.IsContainerPaused(nil, dockerID2)
+	if !paused1 || !paused2 {
+		t.Fatal("both containers should be paused before release test")
+	}
+
+	// Increase segment limit so usage < limit
+	ms.SetScopeLimit(model.SegmentScope("prod"), model.LimitCPU, 200)
+	m.checkScopeEnforcement(nil, model.SegmentScope("prod"))
+
+	// Both containers should be unpaused
+	paused1, _ = md.IsContainerPaused(nil, dockerID1)
+	paused2, _ = md.IsContainerPaused(nil, dockerID2)
+	if paused1 {
+		t.Error("container c1 should be unpaused after segment limit increased above usage")
+	}
+	if paused2 {
+		t.Error("container c2 should be unpaused after segment limit increased above usage")
+	}
+
+	if m.IsScopeEnforced(model.SegmentScope("prod"), model.LimitCPU) {
+		t.Error("segment CPU should not be marked as enforced after release")
+	}
+}
+
+func TestSegmentSpendingBlocksProxy(t *testing.T) {
+	m, ms, md, mc, mp, _ := newTestManager()
+
+	dockerID := "aaaaaaaaaaaa000001"
+	containerID := dockerID[:12]
+
+	md.AddContainer(dockerID, "c1", true)
+	ms.RegisterContainer(dockerID, "c1")
+
+	// Assign container to segment "prod"
+	segID := "prod"
+	ms.CreateSegment(segID, "Production")
+	ms.SetContainerSegment(containerID, &segID)
+
+	cgPath := "/cgroup/c1"
+	mc.CgroupPaths[dockerID] = cgPath
+
+	// Set spending usage exceeding segment limit
+	ms.SetUsage(containerID, model.LimitSpending, 500)
+	ms.SetScopeLimit(model.SegmentScope("prod"), model.LimitSpending, 400)
+
+	m.checkScopeEnforcement(nil, model.SegmentScope("prod"))
+
+	// Segment spending should be blocked on proxy
+	if !mp.IsScopeSpendingBlocked(model.SegmentScope("prod")) {
+		t.Error("segment spending enforcement should set proxy blocked flag for segment scope")
+	}
+
+	// Host scope should NOT be blocked
+	if mp.IsScopeSpendingBlocked(model.ScopeHost) {
+		t.Error("host scope should not be spending-blocked when only segment limit is exceeded")
+	}
+
+	if !m.IsScopeEnforced(model.SegmentScope("prod"), model.LimitSpending) {
+		t.Error("segment spending should be marked as enforced")
+	}
+}
+
+func TestHostEnforcementIncludesSegmentContainers(t *testing.T) {
+	m, ms, md, mc, _, _ := newTestManager()
+
+	dockerID := "aaaaaaaaaaaa000001"
+	containerID := dockerID[:12]
+
+	md.AddContainer(dockerID, "c1", true)
+	ms.RegisterContainer(dockerID, "c1")
+
+	// Assign container to segment "prod"
+	segID := "prod"
+	ms.CreateSegment(segID, "Production")
+	ms.SetContainerSegment(containerID, &segID)
+
+	cgPath := "/cgroup/c1"
+	mc.CgroupPaths[dockerID] = cgPath
+
+	// Set container usage
+	ms.SetUsage(containerID, model.LimitCPU, 150)
+
+	// Set HOST limit below container's usage
+	ms.SetScopeLimit(model.ScopeHost, model.LimitCPU, 100)
+
+	m.checkScopeEnforcement(nil, model.ScopeHost)
+
+	// Container should be paused (host enforcement applies to ALL containers including segmented ones)
+	paused, _ := md.IsContainerPaused(nil, dockerID)
+	if !paused {
+		t.Error("segmented container should be paused when host CPU limit exceeded")
+	}
+
+	if !m.IsScopeEnforced(model.ScopeHost, model.LimitCPU) {
+		t.Error("host CPU should be marked as enforced")
+	}
+}

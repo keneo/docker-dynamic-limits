@@ -1463,3 +1463,523 @@ func TestConfigPersistence(t *testing.T) {
 		t.Error("anthropic should be enabled after loading persisted config")
 	}
 }
+
+// --- Segment API Tests ---
+
+func TestCreateSegment(t *testing.T) {
+	ts, _, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	body, _ := json.Marshal(map[string]string{"id": "seg1", "name": "Segment One"})
+	resp, err := http.Post(ts.URL+"/segments", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /segments: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("status = %d, want 201", resp.StatusCode)
+	}
+
+	var seg model.Segment
+	json.NewDecoder(resp.Body).Decode(&seg)
+	if seg.ID != "seg1" {
+		t.Errorf("ID = %q, want %q", seg.ID, "seg1")
+	}
+	if seg.Name != "Segment One" {
+		t.Errorf("Name = %q, want %q", seg.Name, "Segment One")
+	}
+}
+
+func TestListSegments(t *testing.T) {
+	ts, _, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	// Create two segments
+	body1, _ := json.Marshal(map[string]string{"id": "seg1", "name": "First"})
+	resp1, err := http.Post(ts.URL+"/segments", "application/json", bytes.NewReader(body1))
+	if err != nil {
+		t.Fatalf("POST /segments (1): %v", err)
+	}
+	resp1.Body.Close()
+
+	body2, _ := json.Marshal(map[string]string{"id": "seg2", "name": "Second"})
+	resp2, err := http.Post(ts.URL+"/segments", "application/json", bytes.NewReader(body2))
+	if err != nil {
+		t.Fatalf("POST /segments (2): %v", err)
+	}
+	resp2.Body.Close()
+
+	// List segments
+	resp, err := http.Get(ts.URL + "/segments")
+	if err != nil {
+		t.Fatalf("GET /segments: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	segments, ok := result["segments"].([]interface{})
+	if !ok {
+		t.Fatalf("expected segments array, got %T", result["segments"])
+	}
+	if len(segments) != 2 {
+		t.Errorf("got %d segments, want 2", len(segments))
+	}
+}
+
+func TestDeleteSegment(t *testing.T) {
+	ts, _, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	// Create segment
+	body, _ := json.Marshal(map[string]string{"id": "seg1", "name": "ToDelete"})
+	resp, err := http.Post(ts.URL+"/segments", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /segments: %v", err)
+	}
+	resp.Body.Close()
+
+	// Delete segment
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/segments/seg1", nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE /segments/seg1: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["deleted"] != "seg1" {
+		t.Errorf("deleted = %v, want seg1", result["deleted"])
+	}
+
+	// Verify it's gone
+	resp2, err := http.Get(ts.URL + "/segments/seg1")
+	if err != nil {
+		t.Fatalf("GET /segments/seg1: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Errorf("GET after delete: status = %d, want 404", resp2.StatusCode)
+	}
+}
+
+func TestSegmentLimitsSetAndGet(t *testing.T) {
+	ts, _, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	// Create segment
+	body, _ := json.Marshal(map[string]string{"id": "seg1", "name": "Test"})
+	resp, err := http.Post(ts.URL+"/segments", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /segments: %v", err)
+	}
+	resp.Body.Close()
+
+	// Set a limit on the segment
+	body, _ = json.Marshal(map[string]interface{}{
+		"type":      "cpu",
+		"value":     7200,
+		"operation": "set",
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/segments/seg1/limits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT /segments/seg1/limits: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200", resp.StatusCode)
+	}
+
+	var putResult map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&putResult)
+	if putResult["value"].(float64) != 7200 {
+		t.Errorf("value = %v, want 7200", putResult["value"])
+	}
+	if putResult["scope"] != "segment:seg1" {
+		t.Errorf("scope = %v, want segment:seg1", putResult["scope"])
+	}
+
+	// GET the limits
+	resp2, err := http.Get(ts.URL + "/segments/seg1/limits")
+	if err != nil {
+		t.Fatalf("GET /segments/seg1/limits: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200", resp2.StatusCode)
+	}
+
+	var limits map[string]float64
+	json.NewDecoder(resp2.Body).Decode(&limits)
+	if limits["cpu"] != 7200 {
+		t.Errorf("cpu limit = %v, want 7200", limits["cpu"])
+	}
+}
+
+func TestSegmentAssignAndUnassign(t *testing.T) {
+	ts, ms, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	// Create segment
+	body, _ := json.Marshal(map[string]string{"id": "seg1", "name": "Test"})
+	resp, err := http.Post(ts.URL+"/segments", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /segments: %v", err)
+	}
+	resp.Body.Close()
+
+	// Register a container
+	dockerID := "aaaaaaaaaaaa000001"
+	ms.RegisterContainer(dockerID, "test-container")
+	containerID := dockerID[:12]
+
+	// Assign container to segment
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/segments/seg1/containers/"+containerID+"/assign", nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST assign: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("assign status = %d, want 200", resp.StatusCode)
+	}
+
+	var assignResult map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&assignResult)
+	if assignResult["assigned"] != "seg1" {
+		t.Errorf("assigned = %v, want seg1", assignResult["assigned"])
+	}
+	if assignResult["container"] != containerID {
+		t.Errorf("container = %v, want %s", assignResult["container"], containerID)
+	}
+
+	// Verify container is in segment
+	c, _ := ms.GetContainer(containerID)
+	if c.SegmentID != "seg1" {
+		t.Errorf("SegmentID = %q, want %q", c.SegmentID, "seg1")
+	}
+
+	// Unassign container from segment
+	req, _ = http.NewRequest(http.MethodPost, ts.URL+"/segments/seg1/containers/"+containerID+"/unassign", nil)
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST unassign: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("unassign status = %d, want 200", resp2.StatusCode)
+	}
+
+	var unassignResult map[string]interface{}
+	json.NewDecoder(resp2.Body).Decode(&unassignResult)
+	if unassignResult["unassigned"] != "seg1" {
+		t.Errorf("unassigned = %v, want seg1", unassignResult["unassigned"])
+	}
+
+	// Verify container is no longer in segment
+	c, _ = ms.GetContainer(containerID)
+	if c.SegmentID != "" {
+		t.Errorf("SegmentID = %q, want empty", c.SegmentID)
+	}
+}
+
+func TestSegmentAssignAlreadyInOther(t *testing.T) {
+	ts, ms, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	// Create two segments
+	body, _ := json.Marshal(map[string]string{"id": "seg1", "name": "First"})
+	resp, _ := http.Post(ts.URL+"/segments", "application/json", bytes.NewReader(body))
+	resp.Body.Close()
+
+	body, _ = json.Marshal(map[string]string{"id": "seg2", "name": "Second"})
+	resp, _ = http.Post(ts.URL+"/segments", "application/json", bytes.NewReader(body))
+	resp.Body.Close()
+
+	// Register a container
+	dockerID := "aaaaaaaaaaaa000001"
+	ms.RegisterContainer(dockerID, "test-container")
+	containerID := dockerID[:12]
+
+	// Assign to seg1
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/segments/seg1/containers/"+containerID+"/assign", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST assign to seg1: %v", err)
+	}
+	resp.Body.Close()
+
+	// Try to assign to seg2 without unassigning first
+	req, _ = http.NewRequest(http.MethodPost, ts.URL+"/segments/seg2/containers/"+containerID+"/assign", nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST assign to seg2: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("status = %d, want 409", resp.StatusCode)
+	}
+}
+
+func TestSegmentContainersList(t *testing.T) {
+	ts, ms, md, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	// Create segment
+	body, _ := json.Marshal(map[string]string{"id": "seg1", "name": "Test"})
+	resp, _ := http.Post(ts.URL+"/segments", "application/json", bytes.NewReader(body))
+	resp.Body.Close()
+
+	// Register two containers and assign them
+	dockerID1 := "aaaaaaaaaaaa000001"
+	dockerID2 := "bbbbbbbbbbbb000002"
+	ms.RegisterContainer(dockerID1, "container-1")
+	ms.RegisterContainer(dockerID2, "container-2")
+	md.AddContainer(dockerID1, "container-1", true)
+	md.AddContainer(dockerID2, "container-2", true)
+	cid1 := dockerID1[:12]
+	cid2 := dockerID2[:12]
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/segments/seg1/containers/"+cid1+"/assign", nil)
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	req, _ = http.NewRequest(http.MethodPost, ts.URL+"/segments/seg1/containers/"+cid2+"/assign", nil)
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	// GET /segments/seg1/containers
+	resp, err := http.Get(ts.URL + "/segments/seg1/containers")
+	if err != nil {
+		t.Fatalf("GET /segments/seg1/containers: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	containers, ok := result["containers"].([]interface{})
+	if !ok {
+		t.Fatalf("expected containers array, got %T", result["containers"])
+	}
+	if len(containers) != 2 {
+		t.Errorf("got %d containers, want 2", len(containers))
+	}
+}
+
+func TestSegmentUsage(t *testing.T) {
+	ts, ms, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	// Create segment
+	body, _ := json.Marshal(map[string]string{"id": "seg1", "name": "Test"})
+	resp, _ := http.Post(ts.URL+"/segments", "application/json", bytes.NewReader(body))
+	resp.Body.Close()
+
+	// Register a container, set usage, assign to segment
+	dockerID := "aaaaaaaaaaaa000001"
+	ms.RegisterContainer(dockerID, "test-container")
+	containerID := dockerID[:12]
+	ms.SetUsage(containerID, model.LimitCPU, 500)
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/segments/seg1/containers/"+containerID+"/assign", nil)
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	// GET /segments/seg1/usage
+	resp, err := http.Get(ts.URL + "/segments/seg1/usage")
+	if err != nil {
+		t.Fatalf("GET /segments/seg1/usage: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	usage, ok := result["usage"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected usage map, got %T", result["usage"])
+	}
+	if usage["cpu"].(float64) != 500 {
+		t.Errorf("cpu usage = %v, want 500", usage["cpu"])
+	}
+}
+
+func TestSegmentDetail(t *testing.T) {
+	ts, ms, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	// Create segment
+	body, _ := json.Marshal(map[string]string{"id": "seg1", "name": "Detail Test"})
+	resp, _ := http.Post(ts.URL+"/segments", "application/json", bytes.NewReader(body))
+	resp.Body.Close()
+
+	// Set segment limit
+	body, _ = json.Marshal(map[string]interface{}{
+		"type":      "cpu",
+		"value":     3600,
+		"operation": "set",
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/segments/seg1/limits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	// Register a container and assign
+	dockerID := "aaaaaaaaaaaa000001"
+	ms.RegisterContainer(dockerID, "test-container")
+	containerID := dockerID[:12]
+	ms.SetUsage(containerID, model.LimitCPU, 200)
+
+	req, _ = http.NewRequest(http.MethodPost, ts.URL+"/segments/seg1/containers/"+containerID+"/assign", nil)
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	// GET /segments/seg1
+	resp, err := http.Get(ts.URL + "/segments/seg1")
+	if err != nil {
+		t.Fatalf("GET /segments/seg1: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	// Verify segment info
+	seg, ok := result["segment"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected segment object, got %T", result["segment"])
+	}
+	if seg["id"] != "seg1" {
+		t.Errorf("segment id = %v, want seg1", seg["id"])
+	}
+	if seg["name"] != "Detail Test" {
+		t.Errorf("segment name = %v, want Detail Test", seg["name"])
+	}
+
+	// Verify limits
+	limits, ok := result["limits"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected limits map, got %T", result["limits"])
+	}
+	if limits["cpu"].(float64) != 3600 {
+		t.Errorf("cpu limit = %v, want 3600", limits["cpu"])
+	}
+
+	// Verify usage
+	usage, ok := result["usage"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected usage map, got %T", result["usage"])
+	}
+	if usage["cpu"].(float64) != 200 {
+		t.Errorf("cpu usage = %v, want 200", usage["cpu"])
+	}
+
+	// Verify containers count
+	if result["containers"].(float64) != 1 {
+		t.Errorf("containers = %v, want 1", result["containers"])
+	}
+}
+
+func TestSegmentContainerLimitsViaSegmentPath(t *testing.T) {
+	ts, ms, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	// Create segment
+	body, _ := json.Marshal(map[string]string{"id": "seg1", "name": "Test"})
+	resp, _ := http.Post(ts.URL+"/segments", "application/json", bytes.NewReader(body))
+	resp.Body.Close()
+
+	// Register a container and assign to segment
+	dockerID := "aaaaaaaaaaaa000001"
+	ms.RegisterContainer(dockerID, "test-container")
+	containerID := dockerID[:12]
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/segments/seg1/containers/"+containerID+"/assign", nil)
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	// PUT /segments/seg1/containers/{cid}/limits
+	body, _ = json.Marshal(map[string]interface{}{
+		"type":      "cpu",
+		"value":     1800,
+		"operation": "set",
+	})
+	req, _ = http.NewRequest(http.MethodPut, ts.URL+"/segments/seg1/containers/"+containerID+"/limits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT segment container limits: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	// Verify limit was set
+	lim, _ := ms.GetLimit(containerID, model.LimitCPU)
+	if lim != 1800 {
+		t.Errorf("limit = %d, want 1800", lim)
+	}
+}
+
+func TestSegmentContainerNotMember(t *testing.T) {
+	ts, ms, _, _, _, _ := newTestServer()
+	defer ts.Close()
+
+	// Create segment
+	body, _ := json.Marshal(map[string]string{"id": "seg1", "name": "Test"})
+	resp, _ := http.Post(ts.URL+"/segments", "application/json", bytes.NewReader(body))
+	resp.Body.Close()
+
+	// Register a container but do NOT assign to segment
+	dockerID := "aaaaaaaaaaaa000001"
+	ms.RegisterContainer(dockerID, "test-container")
+	containerID := dockerID[:12]
+
+	// Try PUT /segments/seg1/containers/{cid}/limits on a non-member
+	body, _ = json.Marshal(map[string]interface{}{
+		"type":      "cpu",
+		"value":     1000,
+		"operation": "set",
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/segments/seg1/containers/"+containerID+"/limits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT segment container limits (non-member): %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
+	}
+}
