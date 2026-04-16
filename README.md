@@ -646,9 +646,8 @@ Wall-clock time includes model loading, VRAM allocation, prompt eval, and genera
 
 ## Requirements
 
-- Linux with cgroup v2 (for enforcement; daemon runs in Docker)
-- Docker Engine
-- Go 1.21+
+- macOS with Docker Desktop, or Linux with Docker Engine
+- Go 1.21+ (for building from source)
 
 ## Testing
 
