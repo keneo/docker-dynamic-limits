@@ -1018,7 +1018,7 @@
 
         segmentsList.querySelectorAll('.seg-view').forEach(function (btn) {
             btn.addEventListener('click', function () {
-                window.open('?segment=' + encodeURIComponent(btn.dataset.seg), '_blank');
+                window.location.href = '?segment=' + encodeURIComponent(btn.dataset.seg);
             });
         });
 
@@ -1144,8 +1144,8 @@
     // Set scope badge and title
     var scopeBadge = document.getElementById('scope-badge');
     if (isSegmentScoped && scopeBadge) {
-        scopeBadge.textContent = '[' + segmentScope + ']';
-        scopeBadge.style.cssText = 'font-size:0.6em;color:var(--accent);font-weight:normal;';
+        scopeBadge.innerHTML = '<a href="/" style="color:var(--accent);text-decoration:none;" title="Back to all containers">\u2190 ' + esc(segmentScope) + '</a>';
+        scopeBadge.style.cssText = 'font-size:0.6em;font-weight:normal;';
         document.title = 'DDL - ' + segmentScope;
     }
     // Update panel header
